@@ -1,28 +1,37 @@
 
 
 ```mermaid
-sequenceDiagram
-    participant External API
-    participant Database
-    participant qBittorrent
-    participant retrieve_data_from_endpoint() function
-    participant retrieve_data_from_database() function
-    participant compare_data() function
-    participant upsert_new_data() function
-    participant remove_missing_items() function
-    participant remove_inactive_items() function
-    participant match_and_update_qbittorrent_data() function
+graph TD;
+    A[Retrieve data from multiple API endpoints] --> |Endpoint Data|B(Merge endpoint data with qBittorrent data);
+    O[Retrieve data from qBittorrent client] --> |qBittorent Data|B;
+    B --> C{Compare with existing data};
+    C --> |New data| D(Upsert new data into database);
+    C --> |Updated data| E(Update existing data in database);
+    C --> |Missing data| F(Remove missing data from database);
+    C --> |Inactive data| G(Remove inactive data from database);
+    G --> H(Update database pool);
+    D --> H;
+    E --> H;
+    F --> H;
+    H --> N(Log database status);
+```
 
-    External API->>retrieve_data_from_endpoint(): Retrieve data from endpoint
-    retrieve_data_from_endpoint()-->>compare_data(): New data
-    Database->>retrieve_data_from_database(): Retrieve existing data from database
-    retrieve_data_from_database()-->>compare_data(): Existing data
-    compare_data()-->>upsert_new_data(): New and updated data
-    upsert_new_data()-->>Database: Upserted data
-    compare_data()-->>remove_missing_items(): Missing data
-    remove_missing_items()-->>Database: Removed data
-    compare_data()-->>remove_inactive_items(): Inactive data
-    remove_inactive_items()-->>Database: Removed data
-    compare_data()-->>match_and_update_qbittorrent_data(): qBittorrent data
-    match_and_update_qbittorrent_data()-->>Database: Updated data
+```mermaid
+erDiagram
+    ITEM {
+        int id
+        varchar(255) title
+        varchar(255) status
+        int sizeleft
+        int inactiveCount
+        datetime timestamp
+    }
+    QBITTORRENT {
+        varchar(255) name
+        varchar(255) status
+        int seeds
+        int peers
+        int percentage_completed
+    }
+    ITEM ||--o{ QBITTORRENT : qbittorrent
 ```
