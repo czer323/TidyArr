@@ -142,33 +142,7 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
         return []
         
 
-
-async def process_data(raw_endpoint_data: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """
-    This function processes the retrieved data to prepare it for comparison and insertion into the database.
-
-    Args:
-        raw_endpoint_data (List[Dict[str, str]]): The raw data retrieved from the API endpoint.
-
-    Returns:
-        List[Dict[str, str]]: The processed data.
-    """
-    try:
-        qbittorrent_data = get_data_from_qbittorrent()
-        processed_data = await match_and_update_qbittorrent_data(raw_endpoint_data, qbittorrent_data)
-
-        # Add a timestamp to each item in the processed data
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for item in processed_data:
-            item["timestamp"] = timestamp
-        return processed_data
-    except Exception as exc:
-        logging.exception("Error processing data: %s", exc)
-        return []
-    
-
-
-async def match_and_update_qbittorrent_data(raw_endpoint_data: List[Dict[str, str]], qbittorrent_data: List[Dict[str, str]]) -> List[Dict[str, str]]:
+async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str, str]], qbittorrent_data: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """
     This function iterates over the raw_endpoint_data and attempts to match each item with an item in the qbittorrent_data.
     It then updates the endpoint data with the matched qbittorrent data and returns the updated endpoint data.
@@ -189,45 +163,99 @@ async def match_and_update_qbittorrent_data(raw_endpoint_data: List[Dict[str, st
                 if fuzz.partial_ratio(endpoint_item["title"], qb_item["name"]) >= 99:
                     endpoint_item.update(qb_item)
                     endpoint_item["matched"] = True
-                    break    
-    
-        return raw_endpoint_data
+                    logging.debug("Matched endpoint item with qBittorrent item - Endpoint item: %s - qBittorrent item: %s", endpoint_item, qb_item)
+                    break
+            # If the item was not matched, log a warning
+            if not endpoint_item["matched"]:
+                logging.warning("Could not match endpoint item with qBittorrent item - Endpoint item: %s", endpoint_item)
+
+        # Add a timestamp to each item in the processed data
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for item in raw_endpoint_data:
+            item["timestamp"] = timestamp
+
+        # Change the return variable to merged_endpoint_data
+        merged_endpoint_data = raw_endpoint_data
+        return merged_endpoint_data
+
     # If there is an error, return an empty list
-
-
-
     except Exception as exc:
         logging.exception("Error matching and updating qBittorrent data: %s", exc)
         return []
     
 
-
-async def retrieve_existing_data_from_database(database_connection: str, query_params: Dict[str, str]) -> List[Dict[str, str]]:
+async def compare_new_and_existing_data(merged_endpoint_data: List[Dict[str, Any]], existing_data: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    This function retrieves existing data from the database.
+    This function compares the new and existing data to determine which data needs to be added, updated, marked as missing, or reviewed for inactivity.
+    The merged_endpoint_data has a key named "id" which is used to match items between the new and existing data.
+    New_items are in the new data but not in the existing data.
+    Missing_items are in the existing data but not in the new data.
+    Existing_items are in both the new and existing data and have a matching "id".
+    Existing_items will need to be reviewed for inactivity by running the check_for_inactivity function.
+    We will then return four lists: new_items, updated_items, missing_items, and inactive_items.
 
     Args:
-        database_connection (str): The connection string for the database.
-        query_params (Dict[str, str]): Any necessary query parameters for the database query.
+        merged_endpoint_data (List[Dict[str, Any]]): The merged data from the endpoint and qBittorrent.
+        existing_data (List[Dict[str, Any]]): The existing data in the database.
+        inactive_threshold (int): The threshold for marking an item as inactive.
 
     Returns:
-        List[Dict[str, str]]: The retrieved data.
+        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]: A tuple containing the data to be added, updated, marked as missing, or marked as inactive.
     """
-    # Implementation code goes here
+    merged_endpoint_data_ids = [item["id"] for item in merged_endpoint_data]
+    existing_data_ids = [item["id"] for item in existing_data]
+
+    new_items = [item for item in merged_endpoint_data if item["id"] not in existing_data_ids]
+    missing_items = [item for item in existing_data if item["id"] not in merged_endpoint_data_ids]
+    existing_items = [item for item in merged_endpoint_data if item["id"] in existing_data_ids]
+
+    await check_for_inactivity(existing_items, merged_endpoint_data)
+
+    # Iterate over the existing items and check for inactivity
+    inactive_items = []
+    for item in existing_items:
 
 
-async def compare_new_and_existing_data(processed_data: List[Dict[str, str]], existing_data: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], List[Dict[str, str]]]:
+    return new_items, updated_items, missing_items, inactive_items
+
+
+async def check_for_inactivity(existing_items: List[Dict[str, Any]], merged_endpoint_data: List[Dict[str, Any]]):
     """
-    This function compares the new and existing data to determine which data needs to be updated, removed, or added.
+    This function checks for inactivity in the merged_endpoint_data items by comparing it with existing_items.  
+    Multiple conditions can be matched to determine inactivity.
+    If the item has an inactiveCount above 0, and the sizeleft has changed, half the inactiveCounter.
+    If the item has a warning status and the sizeleft has changed, half the inactiveCounter.
+    If the item has a warning status and the sizeleft has not changed, increment the inactiveCounter.
+    If the item has a key value named qbittorrent and has peers or seeds with a value of 0, increment the inactiveCounter.
+    If the qbittorrent status is "metaDL", increment the inactiveCounter.
+    If the item has a warning status and the inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
 
     Args:
-        processed_data (List[Dict[str, str]]): The processed data to be compared to the existing data.
-        existing_data (List[Dict[str, str]]): The existing data in the database.
+        existing_items (List[Dict[str, Any]]): The existing items to check for inactivity.
+        INACTIVE_THRESHOLD (int): Global variable indicating the threshold for marking an item as inactive.
 
     Returns:
-        Tuple[List[Dict[str, str]], List[Dict[str, str]], List[Dict[str, str]]]: A tuple containing the data to be updated, removed, and added.
+        inactive_items (List[Dict[str, Any]]): The items that have been marked as inactive.
+        active_items (List[Dict[str, Any]]): The items that have not been marked as inactive.
+
     """
-    # Implementation code goes here
+    inactive_items = []
+    active_items = []
+
+    # Iterate over the merged_endpoint_data and check conditions which indicate inactivity
+    
+
+
+
+
+
+        if item["status"] == "error" and item["inactiveCount"] >= INACTIVE_THRESHOLD:
+            inactive_items.append(item)
+        else:
+            active_items.append(item)
+
+    return inactive_items, active_items
+
 
 
 async def upsert_new_and_updated_data_into_database(database_connection: str, data_to_update: List[Dict[str, str]], data_to_add: List[Dict[str, str]]):
@@ -259,12 +287,12 @@ async def remove_missing_data_from_database(database_connection: str, data_to_re
     # Implementation code goes here
 
 
-async def remove_inactive_data_from_database(database_connection: str, query_params: Dict[str, str]):
+async def remove_inactive_data_from_endpoint(endpoint_name: str, query_params: Dict[str, str]):
     """
     This function removes inactive data from the database.
 
     Args:
-        database_connection (str): The connection string for the database.
+        endpoint_name (str): The connection string for the database.
         query_params (Dict[str, str]): Any necessary query parameters for the database query.
 
     Returns:
@@ -287,34 +315,35 @@ async def update_database_pool(database_connection: str, query_params: Dict[str,
 
 
 
-async def main():
-    # Define the authentication credentials for the API endpoints
-    auth_credentials = {"username": "user", "password": "pass"}
+async def main() -> None:
+    """
+    This function is the main function for the script.
+    """
+
+    qbittorrent_data = await get_data_from_qbittorrent()
 
     # Create a list of tasks for each endpoint
     tasks = []
-    for endpoint_name, endpoint_data in ENDPOINTS.items():
+    for endpoint_name in ENDPOINTS:
         # Retrieve data from the endpoint
-        endpoint_url = endpoint_data["url"]
-        endpoint_api_key = endpoint_data["api_key"]
-        raw_data = await retrieve_data_from_endpoint(endpoint_url, endpoint_api_key)
+        endpoint_url = endpoint_name["url"]
+        endpoint_api_key = endpoint_name["api_key"]
+        raw_endpoint_data = await get_data_from_endpoint(endpoint_url, endpoint_api_key)
 
         # Process the retrieved data
-        processed_data = await process_data(raw_data)
+        merged_endpoint_data = await merge_endpoint_with_qbittorrent_data(raw_endpoint_data, qbittorrent_data)
 
         # Retrieve existing data from the database
-        database_file = f"{endpoint_name}.db"
-        query_params = {"status": "active"}
-        existing_data = await retrieve_existing_data_from_database(database_file, query_params)
+        existing_data = DB_POOL.table(endpoint_name)
 
         # Compare the new and existing data
-        data_to_update, data_to_remove, data_to_add = await compare_new_and_existing_data(processed_data, existing_data)
+        new_data, update_data, missing_data, inactive_data = await compare_new_and_existing_data(merged_endpoint_data, existing_data)
 
         # Create tasks for each database operation
-        tasks.append(upsert_new_and_updated_data_into_database(database_file, data_to_update, data_to_add))
-        tasks.append(remove_missing_data_from_database(database_file, data_to_remove))
-        tasks.append(remove_inactive_data_from_database(database_file, query_params))
-        tasks.append(update_database_pool(database_file, query_params))
+        tasks.append(upsert_new_and_updated_data_into_database(endpoint_name, update_data, new_data))
+        tasks.append(remove_missing_data_from_database(endpoint_name, missing_data))
+        tasks.append(remove_inactive_data_from_endpoint(endpoint_name, inactive_data))
+        tasks.append(update_database_pool(endpoint_name, query_params))
 
     # Run all tasks concurrently
     await asyncio.gather(*tasks)
