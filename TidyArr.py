@@ -1,9 +1,33 @@
+"""
+This script retrieves data from Sonarr and Radarr and merges it with data from qBittorrent.
+It then updates the database accordingly.
+
+This script is intended to be run on a schedule using a scheduler such as cron.
+
+The following environment variables must be set:
+
+    QB_HOSTNAME: The hostname or IP address of the qBittorrent API.
+    QB_PORT: The port of the qBittorrent API.
+    QB_USERNAME: The username of the qBittorrent API.
+    QB_PASSWORD: The password of the qBittorrent API.
+
+The following environment variables can optionally be set:
+
+    SCRIPT_INTERVAL: The interval at which the script should run, in seconds. Default is 600 seconds (10 minutes).
+    INACTIVE_THRESHOLD: The number of hours after which a record is considered inactive and should be removed from the database. Default is 72 hours (3 days).
+
+Example usage:
+
+    python TidyArr.py
+
+"""
+
 import os
 import asyncio
 import logging
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
-from typing import Optional, Dict, List, Any, Set
+from typing import Dict, List, Any, Tuple, Optional
 import json
 import aiohttp
 from tinydb import Query, TinyDB
@@ -84,8 +108,12 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                 response.raise_for_status()
                 if response.status == 200:
                     # Extract only the keys we need from each item in the JSON response
-                    items = await response.json()
-                    raw_endpoint_data = [{key: value for key, value in item.items() if key in {"id", "title", "status", "sizeleft"}} for item in items]
+                    response_data: Optional[Dict[str, Any]] = await response.json()
+
+                    # Extract the records from the response data
+                    records = response_data.get("records", [])
+
+                    raw_endpoint_data = [{key: value for key, value in item.items() if key in {"id", "title", "status", "sizeleft"}} for item in records]
 
                     return raw_endpoint_data or []
 
@@ -129,17 +157,17 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
                     "percentage_completed": t["progress"],
                 }
                 for t in torrents
-            ]       
+            ]
             return filtered_torrents or []
-        
+
     except (qbittorrentapi.LoginFailed, qbittorrentapi.APIConnectionError) as exc:
         logging.exception("Error logging into or connecting to qBittorrent: %s", exc)
         return []
-    
+
     except Exception as exc:
         logging.exception("Error retrieving data from qBittorrent: %s", exc)
         return []
-        
+
 
 async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str, str]], qbittorrent_data: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """
@@ -181,7 +209,7 @@ async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str,
     except Exception as exc:
         logging.exception("Error matching and updating qBittorrent data: %s", exc)
         return []
-    
+
 
 async def compare_new_and_existing_data(merged_endpoint_data: List[Dict[str, Any]], existing_data: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
@@ -225,7 +253,7 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
     """
     This function checks for conditions between the merged_endpoint_data items and existing_items to determine how much the inactiveCounter should be incremented.
     Multiple conditions can be matched to determine inactivity and use weighted scoring to increment the inactiveCounter.
-    If the merged_endpoint_data item has an inactiveCount above 0, and the sizeleft has changed, half the inactiveCounter.
+    If the existing_item has an inactiveCount above 0, and the sizeleft has changed, half the inactiveCounter.
     If the merged_endpoint_data item has a warning status and the sizeleft has changed, half the inactiveCounter.
     If the merged_endpoint_data item has a warning status and the sizeleft has not changed, increment the inactiveCounter.
     If the merged_endpoint_data item has a key value named qbittorrent and has peers or seeds with a value of 0, increment the inactiveCounter.
@@ -245,10 +273,15 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
     inactive_items = []
     active_items = []
 
+    # Add a key named "inactiveCount" to each item in the merged_endpoint_data if it has no inactiveCount key
+    for merged_endpoint_item in merged_endpoint_data:
+        if "inactiveCount" not in merged_endpoint_item:
+            merged_endpoint_item["inactiveCount"] = 0
+
     for existing_item in existing_items:
         for merged_endpoint_item in merged_endpoint_data:
             if existing_item["id"] == merged_endpoint_item["id"]:
-                if merged_endpoint_item["inactiveCount"] > 0:
+                if existing_item["inactiveCount"] > 0:
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] /= 2
                         logging.debug("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
@@ -314,9 +347,6 @@ async def upsert_new_and_updated_data_into_database(db_pool: TinyDB.table, endpo
                 db_pool.table(endpoint_name).insert(item)
                 logging.debug("Item %s added to database", item['title'])
 
-    # Close the database connection
-    db_pool.close()
-
 
 async def remove_missing_data_from_database(db_pool: TinyDB.table, endpoint_name: str, missing_items: List[Dict[str, str]]):
     """
@@ -342,7 +372,7 @@ async def remove_missing_data_from_database(db_pool: TinyDB.table, endpoint_name
             logging.debug("Item %s not found in database", item['title'])
 
     # Close the database connection
-    db_pool.close()
+    #db_pool.close()
 
 
 async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_name: str, inactive_items: Dict[str, str]):
@@ -360,6 +390,10 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
     """
     # inactive_items_removed = []
     # get the id of the item
+
+    # Define a query object for searching the database
+    query = Query()
+
     for item in inactive_items:
         item_id = item['id']
 
@@ -378,34 +412,17 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
                     # Create a list of items to be removed from the database
                     #inactive_items_removed.append(item)
                     db_pool.table(endpoint_name).remove(query.id == item['id'])
-                    logging.debug("Item %s removed from database", item['title'])                    
+                    logging.debug("Item %s removed from database", item['title'])
 
                 else:
                     logging.debug("Item %s not removed from %s", item['title'], endpoint_name)
-
-    #await remove_missing_data_from_database(DB_POOL, endpoint_name, inactive_items_removed)
-
-
-    """
-async def update_database_pool(database_connection: str, query_params: Dict[str, str]):
-
-    This function updates the database pool.
-
-    Args:
-        database_connection (str): The connection string for the database.
-        query_params (Dict[str, str]): Any necessary query parameters for the database query.
-
-    Returns:
-
-    """
-
 
 
 async def main() -> None:
     """
     This function is the main function for the script.
     """
-
+    logging.info("Starting script")
     qbittorrent_data = await get_data_from_qbittorrent()
 
     # Create a list of tasks for each endpoint
@@ -427,29 +444,20 @@ async def main() -> None:
         tasks.append(upsert_new_and_updated_data_into_database(DB_POOL, endpoint_name, active_items, new_items))
         tasks.append(remove_missing_data_from_database(DB_POOL, endpoint_name, missing_items))
         tasks.append(remove_inactive_data_from_endpoint(DB_POOL, endpoint_name, inactive_items))
-        #tasks.append(update_database_pool(DB_POOL, endpoint_name, query_params))
 
     # Run all tasks concurrently
     await asyncio.gather(*tasks)
 
+    # Close the database connection
+    DB_POOL.close()
+    logging.info("Script complete")
+    await asyncio.sleep(SCRIPT_INTERVAL)
 
-async def main_loop():
-    while True:
-        await main()
-        await asyncio.sleep(SCRIPT_INTERVAL)
 
-# Run the main loop in the background
-loop = asyncio.get_event_loop()
-task = loop.create_task(main_loop())
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
 
-# Wait for user input
-input("Press enter to exit...")
-
-# Cancel the main loop task
-task.cancel()
-
-# Wait for the main loop task to finish
-try:
-    await task
-except asyncio.CancelledError:
-    pass
+    except Exception as e:
+        logging.exception("Error running API script: %s", e)
+        raise

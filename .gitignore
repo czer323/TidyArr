@@ -3,3 +3,6 @@
 .vscode/settings.json
 .vscode/tasks.json
 oldTidyArr.py
+__pycache__/TidyArr.cpython-311.pyc
+TidyArr.log
+TidyArr.json
