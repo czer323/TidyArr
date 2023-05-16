@@ -58,7 +58,7 @@ SCRIPT_NAME = os.path.splitext(os.path.basename(__file__))[0]
 DB_NAME = f"{SCRIPT_NAME}.json"
 LOG_NAME = f"{SCRIPT_NAME}.log"
 SCRIPT_INTERVAL = 600
-INACTIVE_THRESHOLD = 72
+INACTIVE_THRESHOLD = 720
 
 
 DB_POOL = TinyDB(DB_NAME, sort_keys=True, indent=4, separators=(",", ": "))
@@ -113,7 +113,7 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                     # Extract the records from the response data
                     records = response_data.get("records", [])
 
-                    raw_endpoint_data = [{key: value for key, value in item.items() if key in {"id", "title", "status", "sizeleft"}} for item in records]
+                    raw_endpoint_data = [{key: value for key, value in item.items() if key in {"id", "title", "status", "sizeleft", "downloadId"}} for item in records]
 
                     return raw_endpoint_data or []
 
@@ -127,6 +127,9 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
         except (aiohttp.ClientError, json.JSONDecodeError) as exc:
             logging.exception("Error retrieving data from endpoint - Endpoint: %s : %s", endpoint_name, exc)
             return []
+
+
+
 
 
 async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
@@ -235,7 +238,12 @@ async def compare_new_and_existing_data(merged_endpoint_data: List[Dict[str, Any
     missing_items = [item for item in existing_data if item["id"] not in merged_endpoint_data_ids]
     existing_items = [item for item in merged_endpoint_data if item["id"] in existing_data_ids]
 
-    inactive_items, active_items = await check_for_inactivity(merged_endpoint_data, existing_items)
+    # Add a key named "inactiveCount" to each item in the new_items
+    for new_item in new_items:
+        new_item["inactiveCount"] = 0
+
+    ## something is happening here where we aren't passing the correct data to check_for_inactivity.  We should be passing the existing_items, not the merged_endpoint_data.
+    inactive_items, active_items = await check_for_inactivity(existing_items, existing_data)
 
     if new_items:
         logging.debug("New items: %s", new_items)
@@ -249,16 +257,17 @@ async def compare_new_and_existing_data(merged_endpoint_data: List[Dict[str, Any
     # Return the lists in a tuple, and if any list is empty - return None
     return new_items or [], active_items or [], missing_items or [], inactive_items or []
 
+
 async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], existing_items: List[Dict[str, Any]]):
     """
     This function checks for conditions between the merged_endpoint_data items and existing_items to determine how much the inactiveCounter should be incremented.
     Multiple conditions can be matched to determine inactivity and use weighted scoring to increment the inactiveCounter.
     If the existing_item has an inactiveCount above 0, and the sizeleft has changed, half the inactiveCounter.
-    If the merged_endpoint_data item has a warning status and the sizeleft has changed, half the inactiveCounter.
-    If the merged_endpoint_data item has a warning status and the sizeleft has not changed, increment the inactiveCounter.
+    If the merged_endpoint_data item has a stalledDL status and the sizeleft has changed, half the inactiveCounter.
+    If the merged_endpoint_data item has a stalledDL status and the sizeleft has not changed, increment the inactiveCounter.
     If the merged_endpoint_data item has a key value named qbittorrent and has peers or seeds with a value of 0, increment the inactiveCounter.
     If the merged_endpoint_data qbittorrent status is "metaDL", increment the inactiveCounter.
-    If the merged_endpoint_data item has a warning status and the inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
+    If the merged_endpoint_data item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
 
     Args:
         existing_items (List[Dict[str, Any]]): The existing items to check for inactivity.
@@ -273,41 +282,46 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
     inactive_items = []
     active_items = []
 
-    # Add a key named "inactiveCount" to each item in the merged_endpoint_data if it has no inactiveCount key
-    for merged_endpoint_item in merged_endpoint_data:
-        if "inactiveCount" not in merged_endpoint_item:
-            merged_endpoint_item["inactiveCount"] = 0
+    # Copy key named "inactiveCount" from existing_items to merged_endpoint_data if it has a matching "id"
+    for existing_item in existing_items:
+        for merged_endpoint_item in merged_endpoint_data:
+            if existing_item["id"] == merged_endpoint_item["id"]:
+                if "inactiveCount" in existing_item:
+                    merged_endpoint_item["inactiveCount"] = existing_item["inactiveCount"]
+                else:
+                    merged_endpoint_item["inactiveCount"] = 0
 
+    # Check for conditions to determine inactivity
     for existing_item in existing_items:
         for merged_endpoint_item in merged_endpoint_data:
             if existing_item["id"] == merged_endpoint_item["id"]:
                 if existing_item["inactiveCount"] > 0:
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] /= 2
-                        logging.debug("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
-                if merged_endpoint_item["status"] == "Warning":
+                        logging.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                if merged_endpoint_item["status"] == "stalledDL":
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] /= 2
-                        logging.debug("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logging.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                     else:
                         merged_endpoint_item["inactiveCount"] += 1
-                        logging.debug("Inactive count for item %s increased by 1 (Total: %s) due to warning status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logging.warning("Inactive count for item %s increased by 1 (Total: %s) due to warning status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 if "qbittorrent" in merged_endpoint_item:
                     if merged_endpoint_item["qbittorrent"]["peers"] == 0:
                         merged_endpoint_item["inactiveCount"] += 1
-                        logging.debug("Inactive count for item %s increased by 1 (Total: %s) due to 0 peers", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logging.warning("Inactive count for item %s increased by 1 (Total: %s) due to 0 peers", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                     if merged_endpoint_item["qbittorrent"]["seeds"] == 0:
                         merged_endpoint_item["inactiveCount"] += 2
-                        logging.debug("Inactive count for item %s increased by 2 (Total: %s) due to 0 seeds", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logging.warning("Inactive count for item %s increased by 2 (Total: %s) due to 0 seeds", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                     if merged_endpoint_item["qbittorrent"]["status"] == "metaDL":
                         merged_endpoint_item["inactiveCount"] += 10
-                        logging.debug("Inactive count for item %s increased by 10 (Total: %s) due to metaDL status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logging.warning("Inactive count for item %s increased by 10 (Total: %s) due to metaDL status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 # If the item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
-                if merged_endpoint_item["status"] == "Warning" and merged_endpoint_item["inactiveCount"] >= INACTIVE_THRESHOLD:
+                if merged_endpoint_item["inactiveCount"] >= INACTIVE_THRESHOLD:
                     inactive_items.append(merged_endpoint_item)
-                    logging.debug("Item %s added to inactive_items list", merged_endpoint_item['title'])
+                    logging.warning("Item %s added to inactive_items list", merged_endpoint_item['title'])
                 # If the item's inactiveCounter is less than the INACTIVE_THRESHOLD, add it to the active_items list.
                 else:
                     active_items.append(merged_endpoint_item)
@@ -371,9 +385,6 @@ async def remove_missing_data_from_database(db_pool: TinyDB.table, endpoint_name
         else:
             logging.debug("Item %s not found in database", item['title'])
 
-    # Close the database connection
-    #db_pool.close()
-
 
 async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_name: str, inactive_items: Dict[str, str]):
     """
@@ -394,6 +405,11 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
     # Define a query object for searching the database
     query = Query()
 
+    # Deduplicate the inactive_items list by looking for items with the same downloadId
+    inactive_items = {v['downloadId']:v for v in inactive_items}.values()
+    
+    logging.debug("Inactive items: %s", inactive_items)
+
     for item in inactive_items:
         item_id = item['id']
 
@@ -409,8 +425,6 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
             async with session.delete(url, params=params) as response:
                 if response.status == 200:
                     logging.debug("Item %s removed from %s", item['title'], endpoint_name)
-                    # Create a list of items to be removed from the database
-                    #inactive_items_removed.append(item)
                     db_pool.table(endpoint_name).remove(query.id == item['id'])
                     logging.debug("Item %s removed from database", item['title'])
 
@@ -422,41 +436,44 @@ async def main() -> None:
     """
     This function is the main function for the script.
     """
-    logging.info("Starting script")
-    qbittorrent_data = await get_data_from_qbittorrent()
+    while True:
+        logging.info("Starting script")
+        qbittorrent_data = await get_data_from_qbittorrent()
 
-    # Create a list of tasks for each endpoint
-    tasks = []
-    for endpoint_name in ENDPOINTS:
-        # Retrieve data from the endpoint
-        raw_endpoint_data = await get_data_from_endpoint(endpoint_name)
+        # Create a list of tasks for each endpoint
+        tasks = []
+        for endpoint_name in ENDPOINTS:
+            # Retrieve data from the endpoint
+            raw_endpoint_data = await get_data_from_endpoint(endpoint_name)
 
-        # Process the retrieved data
-        merged_endpoint_data = await merge_endpoint_with_qbittorrent_data(raw_endpoint_data, qbittorrent_data)
+            # Process the retrieved data
+            merged_endpoint_data = await merge_endpoint_with_qbittorrent_data(raw_endpoint_data, qbittorrent_data)
 
-        # Retrieve existing data from the database
-        existing_data = DB_POOL.table(endpoint_name)
+            # Retrieve existing data from the database
+            existing_data = DB_POOL.table(endpoint_name).all()
+            
 
-        # Compare the new and existing data
-        new_items, active_items, missing_items, inactive_items = await compare_new_and_existing_data(merged_endpoint_data, existing_data)
+            # Compare the new and existing data
+            new_items, active_items, missing_items, inactive_items = await compare_new_and_existing_data(merged_endpoint_data, existing_data)
 
-        # Create tasks for each database operation
-        tasks.append(upsert_new_and_updated_data_into_database(DB_POOL, endpoint_name, active_items, new_items))
-        tasks.append(remove_missing_data_from_database(DB_POOL, endpoint_name, missing_items))
-        tasks.append(remove_inactive_data_from_endpoint(DB_POOL, endpoint_name, inactive_items))
+            # Create tasks for each database operation
+            tasks.append(upsert_new_and_updated_data_into_database(DB_POOL, endpoint_name, active_items, new_items))
+            tasks.append(remove_missing_data_from_database(DB_POOL, endpoint_name, missing_items))
+            tasks.append(remove_inactive_data_from_endpoint(DB_POOL, endpoint_name, inactive_items))
 
-    # Run all tasks concurrently
-    await asyncio.gather(*tasks)
+        # Run all tasks concurrently
+        await asyncio.gather(*tasks)
 
-    # Close the database connection
-    DB_POOL.close()
-    logging.info("Script complete")
-    await asyncio.sleep(SCRIPT_INTERVAL)
+        # Close the database connection
+
+        logging.info("Script complete")
+        await asyncio.sleep(SCRIPT_INTERVAL)
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
+        DB_POOL.close()
 
     except Exception as e:
         logging.exception("Error running API script: %s", e)
