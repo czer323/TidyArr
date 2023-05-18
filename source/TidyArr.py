@@ -58,22 +58,24 @@ SCRIPT_NAME = os.path.splitext(os.path.basename(__file__))[0]
 DB_NAME = f"{SCRIPT_NAME}.json"
 LOG_NAME = f"{SCRIPT_NAME}.log"
 SCRIPT_INTERVAL = 600
-INACTIVE_THRESHOLD = 720
+INACTIVE_THRESHOLD = 72
 
 
 DB_POOL = TinyDB(DB_NAME, sort_keys=True, indent=4, separators=(",", ": "))
 
 
 
-logger = logging.getLogger(__name__)
-handler = TimedRotatingFileHandler(LOG_NAME, when="midnight", backupCount=7)
-logger.addHandler(handler)
+
 
 logging.basicConfig(
     filename=LOG_NAME,
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
+
+logger = logging.getLogger(__name__)
+handler = TimedRotatingFileHandler(LOG_NAME, when="midnight", backupCount=7)
+logger.addHandler(handler)
 
 
 # retrieve_data_from_qbittorrent(): Retrieves data from qBittorrent.
@@ -113,6 +115,9 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                     # Extract the records from the response data
                     records = response_data.get("records", [])
 
+                    # Remove records that have a status of "delay"
+                    records = [item for item in records if item.get("status") != "delay"]
+
                     raw_endpoint_data = [{key: value for key, value in item.items() if key in {"id", "title", "status", "sizeleft", "downloadId"}} for item in records]
 
                     return raw_endpoint_data or []
@@ -127,9 +132,6 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
         except (aiohttp.ClientError, json.JSONDecodeError) as exc:
             logging.exception("Error retrieving data from endpoint - Endpoint: %s : %s", endpoint_name, exc)
             return []
-
-
-
 
 
 async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
@@ -154,7 +156,7 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
             filtered_torrents = [
                 {
                     "name": t["name"],
-                    "status": t["state"],
+                    "qb_status": t["state"],
                     "seeds": t["num_seeds"],
                     "peers": t["num_leechs"],
                     "percentage_completed": t["progress"],
@@ -263,10 +265,10 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
     This function checks for conditions between the merged_endpoint_data items and existing_items to determine how much the inactiveCounter should be incremented.
     Multiple conditions can be matched to determine inactivity and use weighted scoring to increment the inactiveCounter.
     If the existing_item has an inactiveCount above 0, and the sizeleft has changed, half the inactiveCounter.
-    If the merged_endpoint_data item has a stalledDL status and the sizeleft has changed, half the inactiveCounter.
-    If the merged_endpoint_data item has a stalledDL status and the sizeleft has not changed, increment the inactiveCounter.
+    If the merged_endpoint_data item has a stalledDL qb_status and the sizeleft has changed, half the inactiveCounter.
+    If the merged_endpoint_data item has a stalledDL qb_status and the sizeleft has not changed, increment the inactiveCounter.
     If the merged_endpoint_data item has a key value named qbittorrent and has peers or seeds with a value of 0, increment the inactiveCounter.
-    If the merged_endpoint_data qbittorrent status is "metaDL", increment the inactiveCounter.
+    If the merged_endpoint_data qbittorrent qb_status is "metaDL", increment the inactiveCounter.
     If the merged_endpoint_data item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
 
     Args:
@@ -299,13 +301,16 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] /= 2
                         logging.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
-                if merged_endpoint_item["status"] == "stalledDL":
+                    else:
+                        merged_endpoint_item["inactiveCount"] *= 1.5
+                        logging.warning("Inactive count for item %s doubled (Total: %s) due to no sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                if merged_endpoint_item["qb_status"] == "stalledDL":
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] /= 2
                         logging.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                     else:
                         merged_endpoint_item["inactiveCount"] += 1
-                        logging.warning("Inactive count for item %s increased by 1 (Total: %s) due to warning status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logging.warning("Inactive count for item %s increased by 1 (Total: %s) due to stalledDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 if "qbittorrent" in merged_endpoint_item:
                     if merged_endpoint_item["qbittorrent"]["peers"] == 0:
@@ -314,9 +319,9 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
                     if merged_endpoint_item["qbittorrent"]["seeds"] == 0:
                         merged_endpoint_item["inactiveCount"] += 2
                         logging.warning("Inactive count for item %s increased by 2 (Total: %s) due to 0 seeds", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
-                    if merged_endpoint_item["qbittorrent"]["status"] == "metaDL":
+                    if merged_endpoint_item["qbittorrent"]["qb_status"] == "metaDL":
                         merged_endpoint_item["inactiveCount"] += 10
-                        logging.warning("Inactive count for item %s increased by 10 (Total: %s) due to metaDL status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logging.warning("Inactive count for item %s increased by 10 (Total: %s) due to metaDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 # If the item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
                 if merged_endpoint_item["inactiveCount"] >= INACTIVE_THRESHOLD:
@@ -424,12 +429,12 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
         async with aiohttp.ClientSession() as session:
             async with session.delete(url, params=params) as response:
                 if response.status == 200:
-                    logging.debug("Item %s removed from %s", item['title'], endpoint_name)
+                    logging.warning("Item %s removed from %s", item['title'], endpoint_name)
                     db_pool.table(endpoint_name).remove(query.id == item['id'])
                     logging.debug("Item %s removed from database", item['title'])
 
                 else:
-                    logging.debug("Item %s not removed from %s", item['title'], endpoint_name)
+                    logging.error("Item %s not removed from %s", item['title'], endpoint_name)
 
 
 async def main() -> None:
