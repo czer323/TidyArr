@@ -115,8 +115,13 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                     # Extract the records from the response data
                     records = response_data.get("records", [])
 
-                    # Remove records that have a status of "delay"
-                    records = [item for item in records if item.get("status") != "delay"]
+                    # Remove records that have a status of "delay" or "completed"
+                    records = [item for item in records if item["status"] not in {"delay", "completed"}]
+
+                    # When we get the record, we need to deduplicate items that have the same downloadID.  We should look for the id with the lowest value and keep that record.
+                    # We can do this by creating a dictionary with the downloadID as the key and the record as the value.  Then we can sort the dictionary by the downloadID and keep the first item.
+                    records_dict = {item["downloadId"]: item for item in records}
+                    records = sorted(records_dict.values(), key=lambda item: item["downloadId"])
 
                     raw_endpoint_data = [{key: value for key, value in item.items() if key in {"id", "title", "status", "sizeleft", "downloadId"}} for item in records]
 
@@ -410,9 +415,6 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
     # Define a query object for searching the database
     query = Query()
 
-    # Deduplicate the inactive_items list by looking for items with the same downloadId
-    inactive_items = {v['downloadId']:v for v in inactive_items}.values()
-    
     logging.debug("Inactive items: %s", inactive_items)
 
     for item in inactive_items:
