@@ -13,3 +13,5 @@ source/__pycache__/TidyArr.cpython-311.pyc
 source/__init__.py
 __pycache__/codium_TidyArr.cpython-311.pyc
 TidyArr.code-workspace
+source/.env
+TidyArr.log.*

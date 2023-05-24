@@ -25,68 +25,55 @@ Example usage:
 import os
 import asyncio
 import logging
-from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
+from datetime import datetime
 from typing import Dict, List, Any, Tuple, Optional
 import json
 import aiohttp
 from tinydb import Query, TinyDB
 import qbittorrentapi
 from fuzzywuzzy import fuzz
+from dotenv import load_dotenv
+
+# import .env file
+load_dotenv()
+
+# Create a dictionary to store all the endpoints
+ENDPOINTS = {}
+
+# Loop through all environment variables and add any that match the naming convention
+for key, value in os.environ.items():
+    if key.startswith("ENDPOINT_") and key.endswith("_URL"):
+        name = key.split("_")[1]
+        api_key = os.environ.get(f"ENDPOINT_{name}_API_KEY")
+        ENDPOINTS[name] = {"url": value, "api_key": api_key}
 
 
-ENDPOINTS = {
-    "radarr": {
-        "url": "***REMOVED***",
-        "api_key": "***REMOVED***",
-    },
-    "sonarr": {
-        "url": "***REMOVED***",
-        "api_key": "***REMOVED***",
-    },
-}
-
-
-# Configuration
-QB_HOSTNAME: str = "***REMOVED***"  # Replace with your qBittorrent API hostname
-QB_PORT: int = ***REMOVED***  # Replace with your qBittorrent API port
-QB_USERNAME: str = "czer323"  # Replace with your qBittorrent username
-QB_PASSWORD: str = "***REMOVED***"  # Replace with your qBittorrent password
+# dotenv Configuration
+QB_HOSTNAME: str = os.environ.get("QB_HOSTNAME")
+QB_PORT: int = int(os.environ.get("QB_PORT"))
+QB_USERNAME: str = os.environ.get("QB_USERNAME")
+QB_PASSWORD: str = os.environ.get("QB_PASSWORD")
+SCRIPT_INTERVAL: int = int(os.environ.get("SCRIPT_INTERVAL") or 600)
+INACTIVE_THRESHOLD: int = int(os.environ.get("INACTIVE_THRESHOLD") or 72)
+LOG_LEVEL: str = os.environ.get("LOG_LEVEL") or "INFO"
 
 
 SCRIPT_NAME = os.path.splitext(os.path.basename(__file__))[0]
 DB_NAME = f"{SCRIPT_NAME}.json"
 LOG_NAME = f"{SCRIPT_NAME}.log"
-SCRIPT_INTERVAL = 600
-INACTIVE_THRESHOLD = 72
 
 
 DB_POOL = TinyDB(DB_NAME, sort_keys=True, indent=4, separators=(",", ": "))
 
 
-
-
-
-logging.basicConfig(
-    filename=LOG_NAME,
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-
-logger = logging.getLogger(__name__)
-handler = TimedRotatingFileHandler(LOG_NAME, when="midnight", backupCount=7)
+# Create a logger that rotates the log file every day
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(logging.DEBUG)
+handler = logging.handlers.TimedRotatingFileHandler(LOG_NAME, when="midnight", backupCount=7)
+handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 
-
-# retrieve_data_from_qbittorrent(): Retrieves data from qBittorrent.
-# retrieve_data_from_endpoint(): Retrieves data from the endpoint.
-# retrieve_data_from_database(): Retrieves existing data from the database.
-# compare_data(): Compares new and existing data to determine which data needs to be updated, removed, or added.
-# upsert_new_data(): Upserts new and updated data into the database.
-# remove_missing_items(): Removes missing data from the database.
-# remove_inactive_items(): Removes inactive data from the database.
-# match_and_update_qbittorrent_data(): Matches and updates qBittorrent data with the data in the database.
-# update_database_pool(): Updates the database pool.
 
 
 async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
@@ -98,7 +85,7 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
         List[Dict[str, str]]: The retrieved data.
     """
     # Retrieve the endpoint URL and API key from the ENDPOINTS dict
-    url = ENDPOINTS[endpoint_name]["url"]
+    url = ENDPOINTS[endpoint_name]["url"] + "/api/v3/queue"
     api_key = ENDPOINTS[endpoint_name]["api_key"]
     params = {"apikey": api_key, "pageSize": 10000}
 
@@ -110,10 +97,10 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                 response.raise_for_status()
                 if response.status == 200:
                     # Extract only the keys we need from each item in the JSON response
-                    response_data: Optional[Dict[str, Any]] = await response.json()
+                    response_data = await response.json(content_type=None)
 
                     # Extract the records from the response data
-                    records = response_data.get("records", [])
+                    records = response_data["records"]
 
                     # Remove records that have a status of "delay" or "completed"
                     records = [item for item in records if item["status"] not in {"delay", "completed"}]
@@ -128,14 +115,14 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                     return raw_endpoint_data or []
 
                 else:
-                    logging.error(
+                    logger.error(
                         "Error retrieving data from endpoint - Endpoint: %s - Status: %s",
                         endpoint_name,
                         response.status,
                     )
                     return []
         except (aiohttp.ClientError, json.JSONDecodeError) as exc:
-            logging.exception("Error retrieving data from endpoint - Endpoint: %s : %s", endpoint_name, exc)
+            logger.exception("Error retrieving data from endpoint - Endpoint: %s : %s", endpoint_name, exc)
             return []
 
 
@@ -171,11 +158,11 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
             return filtered_torrents or []
 
     except (qbittorrentapi.LoginFailed, qbittorrentapi.APIConnectionError) as exc:
-        logging.exception("Error logging into or connecting to qBittorrent: %s", exc)
+        logger.exception("Error logging into or connecting to qBittorrent: %s", exc)
         return []
 
     except Exception as exc:
-        logging.exception("Error retrieving data from qBittorrent: %s", exc)
+        logger.exception("Error retrieving data from qBittorrent: %s", exc)
         return []
 
 
@@ -200,11 +187,11 @@ async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str,
                 if fuzz.partial_ratio(endpoint_item["title"], qb_item["name"]) >= 99:
                     endpoint_item.update(qb_item)
                     endpoint_item["matched"] = True
-                    logging.debug("Matched endpoint item with qBittorrent item - Endpoint item: %s - qBittorrent item: %s", endpoint_item, qb_item)
+                    logger.debug("Matched endpoint item with qBittorrent item - Endpoint item: %s - qBittorrent item: %s", endpoint_item, qb_item)
                     break
             # If the item was not matched, log a warning
             if not endpoint_item["matched"]:
-                logging.warning("Could not match endpoint item with qBittorrent item - Endpoint item: %s", endpoint_item)
+                logger.warning("Could not match endpoint item with qBittorrent item - Endpoint item: %s", endpoint_item)
 
         # Add a timestamp to each item in the processed data
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -217,7 +204,7 @@ async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str,
 
     # If there is an error, return an empty list
     except Exception as exc:
-        logging.exception("Error matching and updating qBittorrent data: %s", exc)
+        logger.exception("Error matching and updating qBittorrent data: %s", exc)
         return []
 
 
@@ -253,13 +240,13 @@ async def compare_new_and_existing_data(merged_endpoint_data: List[Dict[str, Any
     inactive_items, active_items = await check_for_inactivity(existing_items, existing_data)
 
     if new_items:
-        logging.debug("New items: %s", new_items)
+        logger.debug("New items: %s", new_items)
     if active_items:
-        logging.debug("Active items: %s", active_items)
+        logger.debug("Active items: %s", active_items)
     if missing_items:
-        logging.debug("Missing items: %s", missing_items)
+        logger.debug("Missing items: %s", missing_items)
     if inactive_items:
-        logging.debug("Inactive items: %s", inactive_items)
+        logger.debug("Inactive items: %s", inactive_items)
 
     # Return the lists in a tuple, and if any list is empty - return None
     return new_items or [], active_items or [], missing_items or [], inactive_items or []
@@ -305,37 +292,37 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
                 if existing_item["inactiveCount"] > 0:
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] /= 2
-                        logging.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logger.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                     else:
                         merged_endpoint_item["inactiveCount"] *= 1.5
-                        logging.warning("Inactive count for item %s doubled (Total: %s) due to no sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logger.warning("Inactive count for item %s doubled (Total: %s) due to no sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                 if merged_endpoint_item["qb_status"] == "stalledDL":
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] /= 2
-                        logging.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logger.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                     else:
                         merged_endpoint_item["inactiveCount"] += 1
-                        logging.warning("Inactive count for item %s increased by 1 (Total: %s) due to stalledDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logger.warning("Inactive count for item %s increased by 1 (Total: %s) due to stalledDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 if "qbittorrent" in merged_endpoint_item:
                     if merged_endpoint_item["qbittorrent"]["peers"] == 0:
                         merged_endpoint_item["inactiveCount"] += 1
-                        logging.warning("Inactive count for item %s increased by 1 (Total: %s) due to 0 peers", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logger.warning("Inactive count for item %s increased by 1 (Total: %s) due to 0 peers", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                     if merged_endpoint_item["qbittorrent"]["seeds"] == 0:
                         merged_endpoint_item["inactiveCount"] += 2
-                        logging.warning("Inactive count for item %s increased by 2 (Total: %s) due to 0 seeds", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logger.warning("Inactive count for item %s increased by 2 (Total: %s) due to 0 seeds", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                     if merged_endpoint_item["qbittorrent"]["qb_status"] == "metaDL":
                         merged_endpoint_item["inactiveCount"] += 10
-                        logging.warning("Inactive count for item %s increased by 10 (Total: %s) due to metaDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logger.warning("Inactive count for item %s increased by 10 (Total: %s) due to metaDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 # If the item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
                 if merged_endpoint_item["inactiveCount"] >= INACTIVE_THRESHOLD:
                     inactive_items.append(merged_endpoint_item)
-                    logging.warning("Item %s added to inactive_items list", merged_endpoint_item['title'])
+                    logger.warning("Item %s added to inactive_items list", merged_endpoint_item['title'])
                 # If the item's inactiveCounter is less than the INACTIVE_THRESHOLD, add it to the active_items list.
                 else:
                     active_items.append(merged_endpoint_item)
-                    logging.debug("Item %s added to active_items list", merged_endpoint_item['title'])
+                    logger.debug("Item %s added to active_items list", merged_endpoint_item['title'])
 
     return inactive_items or [], active_items or []
 
@@ -361,7 +348,7 @@ async def upsert_new_and_updated_data_into_database(db_pool: TinyDB.table, endpo
             existing_item = db_pool.table(endpoint_name).get(query.id == item['id'])
             if existing_item is not None:
                 db_pool.table(endpoint_name).update(item, query.id == item['id'])
-                logging.debug("Item %s updated in database", item['title'])
+                logger.debug("Item %s updated in database", item['title'])
 
     # Add new items to the database
     if new_items is not None:
@@ -369,7 +356,7 @@ async def upsert_new_and_updated_data_into_database(db_pool: TinyDB.table, endpo
             existing_item = db_pool.table(endpoint_name).get(query.id == item['id'])
             if existing_item is None:
                 db_pool.table(endpoint_name).insert(item)
-                logging.debug("Item %s added to database", item['title'])
+                logger.debug("Item %s added to database", item['title'])
 
 
 async def remove_missing_data_from_database(db_pool: TinyDB.table, endpoint_name: str, missing_items: List[Dict[str, str]]):
@@ -391,9 +378,9 @@ async def remove_missing_data_from_database(db_pool: TinyDB.table, endpoint_name
         existing_item = db_pool.table(endpoint_name).get(query.id == item['id'])
         if existing_item is not None:
             db_pool.table(endpoint_name).remove(query.id == item['id'])
-            logging.debug("Item %s removed from database", item['title'])
+            logger.debug("Item %s removed from database", item['title'])
         else:
-            logging.debug("Item %s not found in database", item['title'])
+            logger.debug("Item %s not found in database", item['title'])
 
 
 async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_name: str, inactive_items: Dict[str, str]):
@@ -415,8 +402,6 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
     # Define a query object for searching the database
     query = Query()
 
-    logging.debug("Inactive items: %s", inactive_items)
-
     for item in inactive_items:
         item_id = item['id']
 
@@ -431,12 +416,12 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
         async with aiohttp.ClientSession() as session:
             async with session.delete(url, params=params) as response:
                 if response.status == 200:
-                    logging.warning("Item %s removed from %s", item['title'], endpoint_name)
+                    logger.warning("Item %s removed from %s", item['title'], endpoint_name)
                     db_pool.table(endpoint_name).remove(query.id == item['id'])
-                    logging.debug("Item %s removed from database", item['title'])
+                    logger.debug("Item %s removed from database", item['title'])
 
                 else:
-                    logging.error("Item %s not removed from %s", item['title'], endpoint_name)
+                    logger.error("Item %s not removed from %s", item['title'], endpoint_name)
 
 
 async def main() -> None:
@@ -444,7 +429,7 @@ async def main() -> None:
     This function is the main function for the script.
     """
     while True:
-        logging.info("Starting script")
+        logger.info("Starting script")
         qbittorrent_data = await get_data_from_qbittorrent()
 
         # Create a list of tasks for each endpoint
@@ -473,7 +458,7 @@ async def main() -> None:
 
         # Close the database connection
 
-        logging.info("Script complete")
+        logger.info("Script complete")
         await asyncio.sleep(SCRIPT_INTERVAL)
 
 
@@ -483,5 +468,5 @@ if __name__ == "__main__":
         DB_POOL.close()
 
     except Exception as e:
-        logging.exception("Error running API script: %s", e)
+        logger.exception("Error running API script: %s", e)
         raise
