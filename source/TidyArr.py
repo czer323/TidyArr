@@ -1,25 +1,44 @@
 """
-This script retrieves data from Sonarr and Radarr and merges it with data from qBittorrent.
-It then updates the database accordingly.
+The purpose of this script is to remove inactive torrents and their associated files from qBittorrent, and to keep track of which media files are currently being tracked by Sonarr and Radarr.
+When an inactive item is identified, the script will tell the Sonarr or Radarr endpoint to add the item to it's blocklist.  If you have the endpoint configured to search for a new item, it will do so.
 
-This script is intended to be run on a schedule using a scheduler such as cron.
+Inactive torrents are defined as items that are not actively downloading, and have not been actively downloading for a period of time.  
+We use conditions to check for these items, and use weighted scoring and a snowball effect to determine which items should be removed.
 
-The following environment variables must be set:
+The script retrieves data from Sonarr and Radarr endpoints specified in environment variables, merges it with data from qBittorrent, and updates a database accordingly. 
+The script updates a database stored in a file named TidyArr.json in the same directory as the script. 
 
-    QB_HOSTNAME: The hostname or IP address of the qBittorrent API.
-    QB_PORT: The port of the qBittorrent API.
-    QB_USERNAME: The username of the qBittorrent API.
-    QB_PASSWORD: The password of the qBittorrent API.
+
+Environment Variables:
+    The following environment variables must be set:
+
+        Endpoint items are special because we can add as many endpoints as we need.  We use the naming convention ENDPOINT_{name}_URL and ENDPOINT_{name}_API_KEY to specify the URL and API key for each endpoint.
+        - ENDPOINT_{name}_URL: str - The URL of the Sonarr or Radarr endpoint with the name {name}. Example: ENDPOINT_SONARR_4k_URL=http://my.sonarr.com:8989
+        - ENDPOINT_{name}_API_KEY: str - The API key for the Sonarr or Radarr endpoint with the name {name}.
+
+        qBittorrent environment variables:
+        - QB_HOSTNAME: str - The hostname or IP address of the qBittorrent API.
+        - QB_PORT: int - The port of the qBittorrent API.
+        - QB_USERNAME: str - The username of the qBittorrent API.
+        - QB_PASSWORD: str - The password of the qBittorrent API.
 
 The following environment variables can optionally be set:
+    - SCRIPT_INTERVAL: int - (Default: 600) The interval at which the script should run, in seconds. Default is 600 seconds (10 minutes).
+    - INACTIVE_THRESHOLD: int - (Default: 72) The number of inactivity points an item must have before it is removed. Default is 72.
+    - LOG_LEVEL: str - (Default: INFO) The log level to use. Default is INFO.  To observe the decisions the script is making, set this to DEBUG.
 
-    SCRIPT_INTERVAL: The interval at which the script should run, in seconds. Default is 600 seconds (10 minutes).
-    INACTIVE_THRESHOLD: The number of hours after which a record is considered inactive and should be removed from the database. Default is 72 hours (3 days).
+
+List of important files:
+    - TidyArr.py: The main script.
+    - TidyArr.json: The database file that stores the state of the script.
+    - TidyArr.log: The log file that stores the logs for the script.
+
 
 Example usage:
-
     python TidyArr.py
 
+To review logs:
+    - Open the file TidyArr.log in the same directory as the script.
 """
 
 import os
@@ -27,13 +46,28 @@ import asyncio
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Dict, List, Any, Tuple
 import json
 import aiohttp
 from tinydb import Query, TinyDB
 import qbittorrentapi
 from fuzzywuzzy import fuzz
 from dotenv import load_dotenv
+
+
+# Constants
+SCRIPT_NAME = os.path.splitext(os.path.basename(__file__))[0]
+DB_NAME = f"{SCRIPT_NAME}.json"
+LOG_NAME = f"{SCRIPT_NAME}.log"
+DB_POOL = TinyDB(DB_NAME, sort_keys=True, indent=4, separators=(",", ": "))
+
+# Create a logger that rotates the log file every day
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(logging.DEBUG)
+handler = TimedRotatingFileHandler(LOG_NAME, when="midnight", backupCount=7)
+handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+logger.addHandler(handler)
+
 
 # import .env file
 load_dotenv()
@@ -48,6 +82,11 @@ for key, value in os.environ.items():
         api_key = os.environ.get(f"ENDPOINT_{name}_API_KEY")
         ENDPOINTS[name] = {"url": value, "api_key": api_key}
 
+# Check if any endpoints were defined
+if not ENDPOINTS:
+    logger.error("No endpoints defined. Please check your configuration.")
+    exit(1)
+
 
 # dotenv Configuration
 QB_HOSTNAME: str = os.environ.get("QB_HOSTNAME")
@@ -58,32 +97,22 @@ SCRIPT_INTERVAL: int = int(os.environ.get("SCRIPT_INTERVAL") or 600)
 INACTIVE_THRESHOLD: int = int(os.environ.get("INACTIVE_THRESHOLD") or 72)
 LOG_LEVEL: str = os.environ.get("LOG_LEVEL") or "INFO"
 
-
-SCRIPT_NAME = os.path.splitext(os.path.basename(__file__))[0]
-DB_NAME = f"{SCRIPT_NAME}.json"
-LOG_NAME = f"{SCRIPT_NAME}.log"
-
-
-DB_POOL = TinyDB(DB_NAME, sort_keys=True, indent=4, separators=(",", ": "))
-
-
-# Create a logger that rotates the log file every day
-logger = logging.getLogger(SCRIPT_NAME)
-logger.setLevel(logging.DEBUG)
-handler = logging.handlers.TimedRotatingFileHandler(LOG_NAME, when="midnight", backupCount=7)
-handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-logger.addHandler(handler)
-
+# Check if all necessary environment variables are set
+if not all([QB_HOSTNAME, QB_PORT, QB_USERNAME, QB_PASSWORD]):
+    raise ValueError("Not all necessary environment variables are set.")
 
 
 async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
     """
     Retrieve data from an external API endpoint.
+
     Args:
         endpoint_name (str): The name of the API endpoint.
+
     Returns:
         List[Dict[str, str]]: The retrieved data.
     """
+
     # Retrieve the endpoint URL and API key from the ENDPOINTS dict
     url = ENDPOINTS[endpoint_name]["url"] + "/api/v3/queue"
     api_key = ENDPOINTS[endpoint_name]["api_key"]
@@ -95,6 +124,7 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
             # Send a GET request to the endpoint
             async with session.get(url, params=params) as response:
                 response.raise_for_status()
+
                 if response.status == 200:
                     # Extract only the keys we need from each item in the JSON response
                     response_data = await response.json(content_type=None)
@@ -105,12 +135,22 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                     # Remove records that have a status of "delay" or "completed"
                     records = [item for item in records if item["status"] not in {"delay", "completed"}]
 
-                    # When we get the record, we need to deduplicate items that have the same downloadID.  We should look for the id with the lowest value and keep that record.
-                    # We can do this by creating a dictionary with the downloadID as the key and the record as the value.  Then we can sort the dictionary by the downloadID and keep the first item.
+                    # When we get the record, we need to deduplicate items that have the same downloadID.  
+                    # We should look for the id with the lowest value and keep that record.
+                    # We can do this by creating a dictionary with the downloadID as the key and the record as the value.  
+                    # Then we can sort the dictionary by the downloadID and keep the first item.
                     records_dict = {item["downloadId"]: item for item in records}
                     records = sorted(records_dict.values(), key=lambda item: item["downloadId"])
 
-                    raw_endpoint_data = [{key: value for key, value in item.items() if key in {"id", "title", "status", "sizeleft", "downloadId"}} for item in records]
+                    # Extract only the keys we need from each item in the records list
+                    raw_endpoint_data = [
+                        {
+                            key: value
+                            for key, value in item.items()
+                            if key in {"id", "title", "status", "sizeleft", "downloadId"}
+                        }
+                        for item in records
+                    ]
 
                     return raw_endpoint_data or []
 
@@ -121,9 +161,11 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                         response.status,
                     )
                     return []
+
         except (aiohttp.ClientError, json.JSONDecodeError) as exc:
             logger.exception("Error retrieving data from endpoint - Endpoint: %s : %s", endpoint_name, exc)
             return []
+
 
 
 async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
@@ -144,7 +186,11 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
                 password=QB_PASSWORD
             )
             qb_client.auth_log_in(session=session)
+
+            # Retrieve all torrents from qBittorrent
             torrents = qb_client.torrents_info()
+
+            # Filter the torrents to only include the keys we need
             filtered_torrents = [
                 {
                     "name": t["name"],
@@ -155,10 +201,15 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
                 }
                 for t in torrents
             ]
+
             return filtered_torrents or []
 
-    except (qbittorrentapi.LoginFailed, qbittorrentapi.APIConnectionError) as exc:
-        logger.exception("Error logging into or connecting to qBittorrent: %s", exc)
+    except qbittorrentapi.LoginFailed as exc:
+        logger.exception("Error logging into qBittorrent: %s", exc)
+        return []
+
+    except qbittorrentapi.APIConnectionError as exc:
+        logger.exception("Error connecting to qBittorrent: %s", exc)
         return []
 
     except Exception as exc:
@@ -172,7 +223,7 @@ async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str,
     It then updates the endpoint data with the matched qbittorrent data and returns the updated endpoint data.
     
     Args:
-        endpoint_data (List[Dict[str, str]]): The processed data to be merged with the qBittorrent data.
+        raw_endpoint_data (List[Dict[str, str]]): The processed data to be merged with the qBittorrent data.
         qbittorrent_data (List[Dict[str, str]]): The existing qBittorrent data to be updated.
 
     Returns:
@@ -208,6 +259,7 @@ async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str,
         return []
 
 
+
 async def compare_new_and_existing_data(merged_endpoint_data: List[Dict[str, Any]], existing_data: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     This function compares the new and existing data to determine which data needs to be new_items, active_items, missing_items, or inactive_items.
@@ -225,34 +277,43 @@ async def compare_new_and_existing_data(merged_endpoint_data: List[Dict[str, Any
     Returns:
         Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]: A tuple containing the data to be added, updated, marked as missing, or marked as inactive.
     """
-    merged_endpoint_data_ids = [item["id"] for item in merged_endpoint_data]
-    existing_data_ids = [item["id"] for item in existing_data]
 
-    new_items = [item for item in merged_endpoint_data if item["id"] not in existing_data_ids]
-    missing_items = [item for item in existing_data if item["id"] not in merged_endpoint_data_ids]
-    existing_items = [item for item in merged_endpoint_data if item["id"] in existing_data_ids]
+    try:
+        # Get the IDs of the merged and existing data
+        merged_endpoint_data_ids = [item["id"] for item in merged_endpoint_data]
+        existing_data_ids = [item["id"] for item in existing_data]
 
-    # Add a key named "inactiveCount" to each item in the new_items
-    for new_item in new_items:
-        new_item["inactiveCount"] = 0
+        # Find new, missing, and existing items
+        new_items = [item for item in merged_endpoint_data if item["id"] not in existing_data_ids]
+        missing_items = [item for item in existing_data if item["id"] not in merged_endpoint_data_ids]
+        existing_items = [item for item in merged_endpoint_data if item["id"] in existing_data_ids]
 
-    ## something is happening here where we aren't passing the correct data to check_for_inactivity.  We should be passing the existing_items, not the merged_endpoint_data.
-    inactive_items, active_items = await check_for_inactivity(existing_items, existing_data)
+        # Add a key named "inactiveCount" to each item in the new_items
+        for new_item in new_items:
+            new_item["inactiveCount"] = 0
 
-    if new_items:
-        logger.debug("New items: %s", new_items)
-    if active_items:
-        logger.debug("Active items: %s", active_items)
-    if missing_items:
-        logger.debug("Missing items: %s", missing_items)
-    if inactive_items:
-        logger.debug("Inactive items: %s", inactive_items)
+        # Check for inactivity in existing items
+        inactive_items, active_items = await check_for_inactivity(existing_items, existing_data)
 
-    # Return the lists in a tuple, and if any list is empty - return None
-    return new_items or [], active_items or [], missing_items or [], inactive_items or []
+        # Log the different types of items
+        if new_items:
+            logger.debug("New items: %s", new_items)
+        if active_items:
+            logger.debug("Active items: %s", active_items)
+        if missing_items:
+            logger.debug("Missing items: %s", missing_items)
+        if inactive_items:
+            logger.debug("Inactive items: %s", inactive_items)
+
+        # Return the lists in a tuple, and if any list is empty - return None
+        return new_items or [], active_items or [], missing_items or [], inactive_items or []
+
+    except Exception as exc:
+        logger.exception("Error comparing new and existing data: %s", exc)
+        return [], [], [], []
 
 
-async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], existing_items: List[Dict[str, Any]]):
+async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], existing_items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     This function checks for conditions between the merged_endpoint_data items and existing_items to determine how much the inactiveCounter should be incremented.
     Multiple conditions can be matched to determine inactivity and use weighted scoring to increment the inactiveCounter.
@@ -264,13 +325,13 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
     If the merged_endpoint_data item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
 
     Args:
-        existing_items (List[Dict[str, Any]]): The existing items to check for inactivity.
-        INACTIVE_THRESHOLD (int): Global variable indicating the threshold for identified an item as inactive.
+        merged_endpoint_data (List[Dict[str, Any]]): The merged data from the endpoint and qBittorrent.
+        existing_items (List[Dict[str, Any]]): The existing data in the database.
 
     Returns:
-        inactive_items (List[Dict[str, Any]]): The items that have been identified as inactive.
-        active_items (List[Dict[str, Any]]): The items that have not been identified as inactive.
-
+        Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]: A tuple containing the items that have been identified as inactive and the items that have not been identified as inactive.
+            inactive_items (List[Dict[str, Any]]): The items that have been identified as inactive.
+            active_items (List[Dict[str, Any]]): The items that have not been identified as inactive.
     """
 
     inactive_items = []
@@ -333,11 +394,13 @@ async def upsert_new_and_updated_data_into_database(db_pool: TinyDB.table, endpo
     New items are added to the database.  Updated items are updated in the database.
 
     Args:
-        endpoint_name (str): The connection string for the database.
-        active_items (List[Dict[str, str]]): The data to be updated in the database.
-        new_items (List[Dict[str, str]]): The data to be added to the database.
+        db_pool (TinyDB.table): The TinyDB table object.
+        endpoint_name (str): The name of the endpoint.
+        active_items (List[Dict[str, str]]): The list of active items to be updated in the database.
+        new_items (List[Dict[str, str]]): The list of new items to be added to the database.
 
     Returns:
+        None
     """
     # Define a query object for searching the database
     query = Query()
@@ -359,28 +422,34 @@ async def upsert_new_and_updated_data_into_database(db_pool: TinyDB.table, endpo
                 logger.debug("Item %s added to database", item['title'])
 
 
+
+
 async def remove_missing_data_from_database(db_pool: TinyDB.table, endpoint_name: str, missing_items: List[Dict[str, str]]):
     """
     This function removes missing data from the database.
 
     Args:
-        database_connection (str): The connection string for the database.
-        data_to_remove (List[Dict[str, str]]): The data to be removed from the database.
+        db_pool (TinyDB.table): The TinyDB table object.
+        endpoint_name (str): The name of the endpoint.
+        missing_items (List[Dict[str, str]]): The list of missing items to be removed from the database.
 
     Returns:
-
+        None
     """
     # Define a query object for searching the database
     query = Query()
 
     # Remove missing items from the database
-    for item in missing_items:
-        existing_item = db_pool.table(endpoint_name).get(query.id == item['id'])
+    for missing_item in missing_items:
+        existing_item = db_pool.table(endpoint_name).get(query.id == missing_item['id'])
         if existing_item is not None:
-            db_pool.table(endpoint_name).remove(query.id == item['id'])
-            logger.debug("Item %s removed from database", item['title'])
+            db_pool.table(endpoint_name).remove(query.id == missing_item['id'])
+            logger.debug("Item %s removed from database", missing_item['title'])
         else:
-            logger.debug("Item %s not found in database", item['title'])
+            logger.debug("Item %s not found in database", missing_item['title'])
+
+
+
 
 
 async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_name: str, inactive_items: Dict[str, str]):
@@ -396,32 +465,36 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
     Returns:
     
     """
-    # inactive_items_removed = []
-    # get the id of the item
-
     # Define a query object for searching the database
     query = Query()
 
+    # Loop through each inactive item
     for item in inactive_items:
         item_id = item['id']
 
+        # Construct the URL for the endpoint
         url = f"{ENDPOINTS[endpoint_name]['url']}/{item_id}"
 
+        # Define the parameters for the endpoint
         params = {
             "apikey": ENDPOINTS[endpoint_name]['api_key'],
             "removeFromClient": "true",
             "blocklist": "true",
         }
 
+        # Send a DELETE request to the endpoint
         async with aiohttp.ClientSession() as session:
             async with session.delete(url, params=params) as response:
+                # If the response is successful, remove the item from the database
                 if response.status == 200:
                     logger.warning("Item %s removed from %s", item['title'], endpoint_name)
                     db_pool.table(endpoint_name).remove(query.id == item['id'])
                     logger.debug("Item %s removed from database", item['title'])
 
+                # If the response is not successful, log an error
                 else:
                     logger.error("Item %s not removed from %s", item['title'], endpoint_name)
+
 
 
 async def main() -> None:
@@ -430,22 +503,23 @@ async def main() -> None:
     """
     while True:
         logger.info("Starting script")
+
+        # Get data from qBittorrent
         qbittorrent_data = await get_data_from_qbittorrent()
 
-        # Create a list of tasks for each endpoint
+        # Process data for each endpoint
         tasks = []
         for endpoint_name in ENDPOINTS:
-            # Retrieve data from the endpoint
+            # Get data from the endpoint
             raw_endpoint_data = await get_data_from_endpoint(endpoint_name)
 
-            # Process the retrieved data
+            # Merge endpoint data with qBittorrent data
             merged_endpoint_data = await merge_endpoint_with_qbittorrent_data(raw_endpoint_data, qbittorrent_data)
 
-            # Retrieve existing data from the database
+            # Get existing data from the database
             existing_data = DB_POOL.table(endpoint_name).all()
-            
 
-            # Compare the new and existing data
+            # Compare new and existing data
             new_items, active_items, missing_items, inactive_items = await compare_new_and_existing_data(merged_endpoint_data, existing_data)
 
             # Create tasks for each database operation
@@ -456,8 +530,6 @@ async def main() -> None:
         # Run all tasks concurrently
         await asyncio.gather(*tasks)
 
-        # Close the database connection
-
         logger.info("Script complete")
         await asyncio.sleep(SCRIPT_INTERVAL)
 
@@ -465,8 +537,9 @@ async def main() -> None:
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-        DB_POOL.close()
-
     except Exception as e:
         logger.exception("Error running API script: %s", e)
         raise
+    finally:
+        # Close the database connection
+        DB_POOL.close()
