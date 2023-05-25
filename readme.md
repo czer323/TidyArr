@@ -54,6 +54,7 @@ I'm sure there's better variables to monitor, different weights to apply and per
 
 I'll probably continue tinkering - since that's who I am - but largely this is as is for now.  I can make a list of wish list items, but I don't expect to achieve all or any of them anytime soon.
 
+- [ ] Add unit testing for testing resiliency
 - [ ] Change inactivity formula to account for current progress and minimize the hit to the inactivity if the download is near completion.
 - [ ] Add additional torrent client support
 - [ ] Build this script into a Docker container
