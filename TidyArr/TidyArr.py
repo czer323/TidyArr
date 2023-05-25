@@ -99,10 +99,10 @@ for key, value in os.environ.items():
 
 # Check if any endpoints were defined
 if ENDPOINTS:
-    logger.debug("Endpoints loaded successfully.")
+    logger.info("Endpoints loaded successfully.")
     print("Endpoints loaded successfully.")
 else:
-    logger.error("No endpoints defined. Please check your configuration.")
+    logger.critical("No endpoints defined. Please check your configuration.")
     print("No endpoints defined. Please check your configuration.")
     exit(1)
 
@@ -117,10 +117,10 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
 # Check if all necessary environment variables are set
 if all([QB_HOSTNAME, QB_PORT, QB_USERNAME, QB_PASSWORD]):
-    logger.debug("Configuration loaded successfully.")
+    logger.info("Configuration loaded successfully.")
     print("Configuration loaded successfully.")
 else:
-    logger.error("Not all necessary environment variables are set.")
+    logger.critical("Not all necessary environment variables are set.")
     print("Not all necessary environment variables are set.")
     exit(1)
 
@@ -178,20 +178,12 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                     ]
 
                     # Log the number of items gathered
-                    logger.debug(
-                        "Successfully retrieved %d items from endpoint - Endpoint: %s",
-                        len(raw_endpoint_data),
-                        endpoint_name,
-                    )
+                    logger.info("Successfully retrieved %d items from endpoint - Endpoint: %s", len(raw_endpoint_data), endpoint_name)
 
                     return raw_endpoint_data or []
 
                 else:
-                    logger.error(
-                        "Error retrieving data from endpoint - Endpoint: %s - Status: %s",
-                        endpoint_name,
-                        response.status,
-                    )
+                    logger.error("Error retrieving data from endpoint - Endpoint: %s - Status: %s", endpoint_name, response.status)
                     return None
 
         except (aiohttp.ClientError, json.JSONDecodeError) as exc:
@@ -236,10 +228,7 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
             ]
 
             # Log the number of items gathered
-            logger.debug(
-                "Successfully retrieved %d items from qBittorrent",
-                len(filtered_torrents),
-            )
+            logger.info("Successfully retrieved %d items from qBittorrent", len(filtered_torrents))
 
             return filtered_torrents or []
 
@@ -431,11 +420,11 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
                 # If the item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
                 if merged_endpoint_item["inactiveCount"] >= INACTIVE_THRESHOLD:
                     inactive_items.append(merged_endpoint_item)
-                    logger.warning("Item %s added to inactive_items list", merged_endpoint_item['title'])
+                    logger.info("Item %s added to inactive_items list", merged_endpoint_item['title'])
                 # If the item's inactiveCounter is less than the INACTIVE_THRESHOLD, add it to the active_items list.
                 else:
                     active_items.append(merged_endpoint_item)
-                    logger.debug("Item %s added to active_items list", merged_endpoint_item['title'])
+                    logger.info("Item %s added to active_items list", merged_endpoint_item['title'])
 
     return inactive_items or [], active_items or []
 
@@ -465,7 +454,7 @@ async def upsert_new_and_updated_data_into_database(db_pool: TinyDB.table, endpo
             existing_item = db_pool.table(endpoint_name).get(query.id == item['id'])
             if existing_item is not None:
                 db_pool.table(endpoint_name).update(item, query.id == item['id'])
-                logger.debug("Item %s updated in database", item['title'])
+                logger.info("Item %s updated in database", item['title'])
 
     # Add new items to the database
     if new_items is not None:
@@ -473,7 +462,7 @@ async def upsert_new_and_updated_data_into_database(db_pool: TinyDB.table, endpo
             existing_item = db_pool.table(endpoint_name).get(query.id == item['id'])
             if existing_item is None:
                 db_pool.table(endpoint_name).insert(item)
-                logger.debug("Item %s added to database", item['title'])
+                logger.info("Item %s added to database", item['title'])
 
 
 
@@ -498,9 +487,9 @@ async def remove_missing_data_from_database(db_pool: TinyDB.table, endpoint_name
         existing_item = db_pool.table(endpoint_name).get(query.id == missing_item['id'])
         if existing_item is not None:
             db_pool.table(endpoint_name).remove(query.id == missing_item['id'])
-            logger.debug("Item %s removed from database", missing_item['title'])
+            logger.info("Item %s removed from database", missing_item['title'])
         else:
-            logger.debug("Item %s not found in database", missing_item['title'])
+            logger.error("Item %s not found in database", missing_item['title'])
 
 
 
@@ -527,7 +516,7 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
         item_id = item['id']
 
         # Construct the URL for the endpoint
-        url = f"{ENDPOINTS[endpoint_name]['url']}/{item_id}"
+        url = f"{ENDPOINTS[endpoint_name]['url']}/api/v3/queue/{item_id}"
 
         # Define the parameters for the endpoint
         params = {
@@ -543,7 +532,7 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
                 if response.status == 200:
                     logger.warning("Item %s removed from %s", item['title'], endpoint_name)
                     db_pool.table(endpoint_name).remove(query.id == item['id'])
-                    logger.debug("Item %s removed from database", item['title'])
+                    logger.info("Item %s removed from database", item['title'])
 
                 # If the response is not successful, log an error
                 else:
@@ -568,7 +557,7 @@ async def main() -> None:
         for endpoint_name in ENDPOINTS:
             # Skip processing if qbittorrent_data is not received
             if qbittorrent_data is None:
-                logger.error("No data received from qBittorrent. Skipping endpoint %s", endpoint_name)
+                logger.critical("No data received from qBittorrent. Skipping endpoint %s", endpoint_name)
                 continue
 
             # Get data from the endpoint
@@ -576,7 +565,7 @@ async def main() -> None:
 
             # Skip processing if qbittorrent_data is not received
             if raw_endpoint_data is None:
-                logger.error("No data received from endpoint. Skipping endpoint %s", endpoint_name)
+                logger.critical("No data received from endpoint. Skipping endpoint %s", endpoint_name)
                 continue
 
             # Merge endpoint data with qBittorrent data
@@ -603,8 +592,8 @@ async def main() -> None:
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except Exception as e:
-        logger.exception("Error running API script: %s", e)
+    except Exception as exc:
+        logger.exception("Error running API script: %s", exc)
         raise
     finally:
         # Close the database connection
