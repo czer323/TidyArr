@@ -426,11 +426,16 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
                     merged_endpoint_item["inactiveCount"] += 10
                     logger.warning("Inactive count for item %s increased by 10 (Total: %s) due to metaDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
+                if merged_endpoint_item["percentage_completed"] > 0.1 and merged_endpoint_item["inactiveCount"] > existing_item["inactiveCount"]:
+                    prorated_inactive_count = abs(merged_endpoint_item["inactiveCount"] - (existing_item["inactiveCount"])) * merged_endpoint_item["percentage_completed"]
+                    merged_endpoint_item["inactiveCount"] = round(merged_endpoint_item["inactiveCount"] - prorated_inactive_count, 2)
+                    logger.warning("Inactive count for item %s decreased by %s (Total: %s) due to percentage completed: %s", merged_endpoint_item['title'], prorated_inactive_count, merged_endpoint_item['inactiveCount'], merged_endpoint_item['percentage_completed'])
 
                 # If the item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
                 if merged_endpoint_item["inactiveCount"] >= INACTIVE_THRESHOLD:
                     inactive_items.append(merged_endpoint_item)
                     logger.info("Item %s added to inactive_items list", merged_endpoint_item['title'])
+                    
                 # If the item's inactiveCounter is less than the INACTIVE_THRESHOLD, add it to the active_items list.
                 else:
                     active_items.append(merged_endpoint_item)

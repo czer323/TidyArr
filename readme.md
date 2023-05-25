@@ -55,7 +55,7 @@ I'm sure there's better variables to monitor, different weights to apply and per
 I'll probably continue tinkering - since that's who I am - but largely this is as is for now.  I can make a list of wish list items, but I don't expect to achieve all or any of them anytime soon.
 
 - [ ] Add unit testing for testing resiliency
-- [ ] Change inactivity formula to account for current progress and minimize the hit to the inactivity if the download is near completion.
+- [X] Change inactivity formula to account for current progress and minimize the hit to the inactivity if the download is near completion.
 - [ ] Add additional torrent client support
 - [ ] Build this script into a Docker container
 - [ ] Revisit all logging output to ensure standardization
@@ -69,15 +69,17 @@ I'll probably continue tinkering - since that's who I am - but largely this is a
 #### Ways to increase the inactivity counter
 
 1. If the qbittorrent status is stalledDL and the sizeleft has not changed
-2. If the qbittorrent has peers with a value of 0
-3. If the qbittorrent has seeds with a value of 0
-4. If the qbittorrent status is "metaDL"
-5. If the qbittorrent filesize is the same as the previous filesize, start to snowball the inactivity counter by multiplying it by 1.1
+2. If the qbittorrent status is stalledDL and has peers with a value of 0
+3. If the qbittorrent status is stalledDL and has seeds with a value of 0
+4. If the qbittorrent status is stalledDL and the availability is less than 0.1
+5. If the qbittorrent status is "metaDL"
+6. If the qbittorrent filesize is the same as the previous filesize, start to snowball the inactivity counter by multiplying it by 1.05
+
+We then take the difference between the original inactive count and the updated inactive count - and reduce the updated count by the % that the file is completed.
 
 #### Ways to decrease the inactivity counter
 
-1. If the existing item has an inactiveCount above 0, and the sizeleft has changed, then we halve the inactiveCounter.
-2. If the endpoint item has a stalledDL qb_status and the sizeleft has changed, then we halve the inactiveCounter.
+1. If the existing item has an inactiveCount above 1, and the sizeleft has changed, then we halve the inactiveCounter.
 
 If an item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, then we add it to the inactive_items list.
 
@@ -138,7 +140,7 @@ The following environment variables can optionally be set:
 | --- | --- | --- |
 | `SCRIPT_INTERVAL` | The interval at which the script should run, in seconds. | `600` |
 | `INACTIVE_THRESHOLD` | The number of inactivity points an item must have before it is removed. | `72` |
-| `LOG_LEVEL` | The log level to use. To observe the decisions the script is making, set this to `INFO`. To observe all of the JSON being processed, you can set the log level to `DEBUG`. | `WARNING` |
+| `LOG_LEVEL` | The log level to use. `WARNING` events are all related to items being inactive.  To see general details of all items, change this to `INFO`.  To see all JSON parsing and filtering, you can change this to `DEBUG`. | `WARNING` |
 
 ### Example .env File Configuration
 
