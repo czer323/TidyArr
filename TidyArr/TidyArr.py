@@ -398,6 +398,7 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
     for existing_item in existing_items:
         for merged_endpoint_item in merged_endpoint_data:
             if existing_item["id"] == merged_endpoint_item["id"]:
+
                 if existing_item["inactiveCount"] > 0:
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] /= 2
@@ -405,6 +406,7 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
                     else:
                         merged_endpoint_item["inactiveCount"] *= 1.1
                         logger.warning("Inactive count for item %s multiplied by 1.1 (Total: %s) due to no sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+
                 if merged_endpoint_item["qb_status"] == "stalledDL":
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] /= 2
@@ -413,16 +415,18 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
                         merged_endpoint_item["inactiveCount"] += 1
                         logger.warning("Inactive count for item %s increased by 1 (Total: %s) due to stalledDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
-                if "qbittorrent" in merged_endpoint_item:
-                    if merged_endpoint_item["qbittorrent"]["peers"] == 0:
-                        merged_endpoint_item["inactiveCount"] += 1
-                        logger.warning("Inactive count for item %s increased by 1 (Total: %s) due to 0 peers", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
-                    if merged_endpoint_item["qbittorrent"]["seeds"] == 0:
-                        merged_endpoint_item["inactiveCount"] += 2
-                        logger.warning("Inactive count for item %s increased by 2 (Total: %s) due to 0 seeds", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
-                    if merged_endpoint_item["qbittorrent"]["qb_status"] == "metaDL":
-                        merged_endpoint_item["inactiveCount"] += 10
-                        logger.warning("Inactive count for item %s increased by 10 (Total: %s) due to metaDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+
+                if merged_endpoint_item["peers"] == 0:
+                    merged_endpoint_item["inactiveCount"] += 1
+                    logger.warning("Inactive count for item %s increased by 1 (Total: %s) due to 0 peers", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+
+                if merged_endpoint_item["seeds"] == 0:
+                    merged_endpoint_item["inactiveCount"] += 2
+                    logger.warning("Inactive count for item %s increased by 2 (Total: %s) due to 0 seeds", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+
+                if merged_endpoint_item["qb_status"] == "metaDL":
+                    merged_endpoint_item["inactiveCount"] += 10
+                    logger.warning("Inactive count for item %s increased by 10 (Total: %s) due to metaDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 # If the item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
                 if merged_endpoint_item["inactiveCount"] >= INACTIVE_THRESHOLD:
