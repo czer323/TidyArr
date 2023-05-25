@@ -192,11 +192,11 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                         endpoint_name,
                         response.status,
                     )
-                    return []
+                    return None
 
         except (aiohttp.ClientError, json.JSONDecodeError) as exc:
             logger.exception("Error retrieving data from endpoint - Endpoint: %s : %s", endpoint_name, exc)
-            return []
+            return None
 
 
 
@@ -245,15 +245,15 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
 
     except qbittorrentapi.LoginFailed as exc:
         logger.exception("Error logging into qBittorrent: %s", exc)
-        return []
+        return None
 
     except qbittorrentapi.APIConnectionError as exc:
         logger.exception("Error connecting to qBittorrent: %s", exc)
-        return []
+        return None
 
     except Exception as exc:
         logger.exception("Error retrieving data from qBittorrent: %s", exc)
-        return []
+        return None
 
 
 
@@ -566,8 +566,18 @@ async def main() -> None:
         # Process data for each endpoint
         tasks = []
         for endpoint_name in ENDPOINTS:
+            # Skip processing if qbittorrent_data is not received
+            if qbittorrent_data is None:
+                logger.error("No data received from qBittorrent. Skipping endpoint %s", endpoint_name)
+                continue
+
             # Get data from the endpoint
             raw_endpoint_data = await get_data_from_endpoint(endpoint_name)
+
+            # Skip processing if qbittorrent_data is not received
+            if raw_endpoint_data is None:
+                logger.error("No data received from endpoint. Skipping endpoint %s", endpoint_name)
+                continue
 
             # Merge endpoint data with qBittorrent data
             merged_endpoint_data = await merge_endpoint_with_qbittorrent_data(raw_endpoint_data, qbittorrent_data)
