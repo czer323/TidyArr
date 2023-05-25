@@ -51,23 +51,39 @@ Example usage:
 
 To review logs:
     - Open the file TidyArr.log in the same directory as the script.
-
-
-
+    
 """
 
-import os
+
+
+# Imports
+import sys
 import asyncio
-import logging
-from logging.handlers import TimedRotatingFileHandler
-from datetime import datetime
-from typing import Dict, List, Any, Tuple
 import json
+import logging
+import os
+from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
+from typing import Any, Dict, List, Tuple
 import aiohttp
-from tinydb import Query, TinyDB
 import qbittorrentapi
-from fuzzywuzzy import fuzz
 from dotenv import load_dotenv
+from fuzzywuzzy import fuzz
+from tinydb import Query, TinyDB
+
+
+# import .env file
+load_dotenv()
+
+# dotenv Configuration
+QB_HOSTNAME = os.environ.get("QB_HOSTNAME")
+QB_PORT = int(os.environ.get("QB_PORT", 0))
+QB_USERNAME = os.environ.get("QB_USERNAME")
+QB_PASSWORD = os.environ.get("QB_PASSWORD")
+SCRIPT_INTERVAL = int(os.environ.get("SCRIPT_INTERVAL", 600))
+INACTIVE_THRESHOLD = int(os.environ.get("INACTIVE_THRESHOLD", 72))
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "WARNING")
+
 
 
 # Constants
@@ -79,13 +95,10 @@ DB_POOL = TinyDB(os.path.join(SCRIPT_DIR, DB_NAME), sort_keys=True, indent=4, se
 
 # Create a logger that rotates the log file every day
 logger = logging.getLogger(SCRIPT_NAME)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(getattr(logging, LOG_LEVEL))
 handler = TimedRotatingFileHandler(LOG_NAME, when="midnight", backupCount=7)
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
-
-# import .env file
-load_dotenv()
 
 # Create a dictionary to store all the endpoints
 ENDPOINTS = {}
@@ -104,16 +117,9 @@ if ENDPOINTS:
 else:
     logger.critical("No endpoints defined. Please check your configuration.")
     print("No endpoints defined. Please check your configuration.")
-    exit(1)
+    sys.exit(1)
 
-# dotenv Configuration
-QB_HOSTNAME = os.environ.get("QB_HOSTNAME")
-QB_PORT = int(os.environ.get("QB_PORT", 0))
-QB_USERNAME = os.environ.get("QB_USERNAME")
-QB_PASSWORD = os.environ.get("QB_PASSWORD")
-SCRIPT_INTERVAL = int(os.environ.get("SCRIPT_INTERVAL", 600))
-INACTIVE_THRESHOLD = int(os.environ.get("INACTIVE_THRESHOLD", 72))
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+
 
 # Check if all necessary environment variables are set
 if all([QB_HOSTNAME, QB_PORT, QB_USERNAME, QB_PASSWORD]):
@@ -122,7 +128,7 @@ if all([QB_HOSTNAME, QB_PORT, QB_USERNAME, QB_PASSWORD]):
 else:
     logger.critical("Not all necessary environment variables are set.")
     print("Not all necessary environment variables are set.")
-    exit(1)
+    sys.exit(1)
 
 
 
@@ -186,8 +192,8 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                     logger.error("Error retrieving data from endpoint - Endpoint: %s - Status: %s", endpoint_name, response.status)
                     return None
 
-        except (aiohttp.ClientError, json.JSONDecodeError) as exc:
-            logger.exception("Error retrieving data from endpoint - Endpoint: %s : %s", endpoint_name, exc)
+        except (aiohttp.ClientError, json.JSONDecodeError) as error:
+            logger.exception("Error retrieving data from endpoint - Endpoint: %s : %s", endpoint_name, error)
             return None
 
 
@@ -222,7 +228,8 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
                     "qb_status": t["state"],
                     "seeds": t["num_seeds"],
                     "peers": t["num_leechs"],
-                    "percentage_completed": t["progress"],
+                    "percentage_completed": round(t["progress"], 2),
+                    "availability": t["availability"],
                 }
                 for t in torrents
             ]
@@ -232,16 +239,16 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
 
             return filtered_torrents or []
 
-    except qbittorrentapi.LoginFailed as exc:
-        logger.exception("Error logging into qBittorrent: %s", exc)
+    except qbittorrentapi.LoginFailed as error:
+        logger.exception("Error logging into qBittorrent: %s", error)
         return None
 
-    except qbittorrentapi.APIConnectionError as exc:
-        logger.exception("Error connecting to qBittorrent: %s", exc)
+    except qbittorrentapi.APIConnectionError as error:
+        logger.exception("Error connecting to qBittorrent: %s", error)
         return None
 
-    except Exception as exc:
-        logger.exception("Error retrieving data from qBittorrent: %s", exc)
+    except (aiohttp.ClientError, json.JSONDecodeError) as error:
+        logger.exception("Error retrieving data: %s", error)
         return None
 
 
@@ -284,9 +291,9 @@ async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str,
         return merged_endpoint_data or []
 
     # If there is an error, return an empty list
-    except Exception as exc:
-        logger.exception("Error matching and updating qBittorrent data: %s", exc)
-        return []
+    except (TypeError, ValueError, KeyError) as error:
+        logger.exception("Error matching and updating qBittorrent data: %s", error)
+        return None
 
 
 
@@ -339,12 +346,14 @@ async def compare_new_and_existing_data(merged_endpoint_data: List[Dict[str, Any
         # Return the lists in a tuple, and if any list is empty - return None
         return new_items or [], active_items or [], missing_items or [], inactive_items or []
 
-    except KeyError as exc:
-        logger.exception("Error accessing dictionary key: %s", exc)
-    except ValueError as exc:
-        logger.exception("Error with value: %s", exc)
-    except Exception as exc:
-        logger.exception("Error comparing new and existing data: %s", exc)
+    except KeyError as error:
+        logger.exception("Error accessing dictionary key: %s", error)
+        return [], [], [], []
+    except ValueError as error:
+        logger.exception("Error with value: %s", error)
+        return [], [], [], []
+    except TypeError as error:
+        logger.exception("Error with type: %s", error)
         return [], [], [], []
 
 
@@ -388,34 +397,35 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
         for merged_endpoint_item in merged_endpoint_data:
             if existing_item["id"] == merged_endpoint_item["id"]:
 
-                if existing_item["inactiveCount"] > 0:
+                if existing_item["inactiveCount"] > 1:
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
-                        merged_endpoint_item["inactiveCount"] /= 2
+                        merged_endpoint_item["inactiveCount"] /= round(merged_endpoint_item["inactiveCount"] / 2, 2)
                         logger.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                     else:
-                        merged_endpoint_item["inactiveCount"] *= 1.1
-                        logger.warning("Inactive count for item %s multiplied by 1.1 (Total: %s) due to no sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        merged_endpoint_item["inactiveCount"] *= round(merged_endpoint_item["inactiveCount"] / 1.05, 2)
+                        logger.warning("Inactive count for item %s multiplied by 1.05 (Total: %s) due to no sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 if merged_endpoint_item["qb_status"] == "stalledDL":
-                    if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
-                        merged_endpoint_item["inactiveCount"] /= 2
-                        logger.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
-                    else:
+                    if existing_item["sizeleft"] == merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] += 1
                         logger.warning("Inactive count for item %s increased by 1 (Total: %s) due to stalledDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
+                    if merged_endpoint_item["peers"] == 0:
+                        merged_endpoint_item["inactiveCount"] += 1
+                        logger.warning("Inactive count for item %s increased by 1 (Total: %s) due to 0 peers", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
-                if merged_endpoint_item["peers"] == 0:
-                    merged_endpoint_item["inactiveCount"] += 1
-                    logger.warning("Inactive count for item %s increased by 1 (Total: %s) due to 0 peers", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                    if merged_endpoint_item["seeds"] == 0:
+                        merged_endpoint_item["inactiveCount"] += 2
+                        logger.warning("Inactive count for item %s increased by 2 (Total: %s) due to 0 seeds", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
-                if merged_endpoint_item["seeds"] == 0:
-                    merged_endpoint_item["inactiveCount"] += 2
-                    logger.warning("Inactive count for item %s increased by 2 (Total: %s) due to 0 seeds", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                    if merged_endpoint_item["availability"] < 0.1:
+                        merged_endpoint_item["inactiveCount"] += 1
+                        logger.warning("Inactive count for item %s increased by 2 (Total: %s) due to low availability", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 if merged_endpoint_item["qb_status"] == "metaDL":
                     merged_endpoint_item["inactiveCount"] += 10
                     logger.warning("Inactive count for item %s increased by 10 (Total: %s) due to metaDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+
 
                 # If the item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
                 if merged_endpoint_item["inactiveCount"] >= INACTIVE_THRESHOLD:
@@ -494,7 +504,6 @@ async def remove_missing_data_from_database(db_pool: TinyDB.table, endpoint_name
 
 
 
-
 async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_name: str, inactive_items: Dict[str, str]):
     """
     This function connects to the sonarr or radarr endpoint based on the endpoint_name performs a delete operation on the inactive items.
@@ -537,7 +546,6 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
                 # If the response is not successful, log an error
                 else:
                     logger.error("Item %s not removed from %s", item['title'], endpoint_name)
-
 
 
 

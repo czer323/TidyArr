@@ -138,7 +138,7 @@ The following environment variables can optionally be set:
 | --- | --- | --- |
 | `SCRIPT_INTERVAL` | The interval at which the script should run, in seconds. | `600` |
 | `INACTIVE_THRESHOLD` | The number of inactivity points an item must have before it is removed. | `72` |
-| `LOG_LEVEL` | The log level to use. To observe the decisions the script is making, set this to `DEBUG`. | `INFO` |
+| `LOG_LEVEL` | The log level to use. To observe the decisions the script is making, set this to `INFO`. To observe all of the JSON being processed, you can set the log level to `DEBUG`. | `WARNING` |
 
 ### Example .env File Configuration
 
@@ -160,7 +160,7 @@ QB_PASSWORD=$up3r$3cr3t
 # Script settings (Optional)
 SCRIPT_INTERVAL=600
 INACTIVE_THRESHOLD=72
-LOG_LEVEL=DEBUG
+LOG_LEVEL=WARNING
 ```
 
 ## Obligatory Diagrams
