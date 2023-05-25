@@ -1,13 +1,25 @@
 """
-The purpose of this script is to remove inactive torrents and their associated files from qBittorrent, and to keep track of which media files are currently being tracked by Sonarr and Radarr.
-When an inactive item is identified, the script will tell the Sonarr or Radarr endpoint to add the item to it's blocklist.  If you have the endpoint configured to search for a new item, it will do so.
+The purpose of this script is to monitor torrents added to qBittorrent by Radarr and Sonarr and remove items identified as inactive torrents.
+When an inactive item is identified, the script will tell the Sonarr or Radarr endpoint that the item has failed.
+If Radarr and Sonarr are configured to redownload failed items, it will do so.
 
-Inactive torrents are defined as items that are not actively downloading, and have not been actively downloading for a period of time.  
-We use conditions to check for these items, and use weighted scoring and a snowball effect to determine which items should be removed.
+Inactive torrents are defined as items that are not actively downloading.  We use conditions to check for these items, 
+and use weighted scoring and a snowball effect to determine which items should be removed. 
 
-The script retrieves data from Sonarr and Radarr endpoints specified in environment variables, merges it with data from qBittorrent, and updates a database accordingly. 
-The script updates a database stored in a file named TidyArr.json in the same directory as the script. 
+The script will check for the following conditions to determine if an item is inactive:
 
+    Ways to increase the inactivity counter:
+        1. If the qbittorrent status is stalledDL and the sizeleft has not changed
+        2. If the qbittorrent has peers with a value of 0
+        3. If the qbittorrent has seeds with a value of 0
+        4. If the qbittorrent status is "metaDL"
+        5. If the qbittorrent filesize is the same as the previous filesize, start to snowball the inactivity counter by multiplying it by 1.1
+
+    Ways to decrease the inactivity counter:
+        1. If the existing item has an inactiveCount above 0, and the sizeleft has changed, then we halve the inactiveCounter.
+        2. If the endpoint item has a stalledDL qb_status and the sizeleft has changed, then we halve the inactiveCounter.
+
+    If an item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, then we add it to the inactive_items list.
 
 Environment Variables:
     The following environment variables must be set:
@@ -39,6 +51,9 @@ Example usage:
 
 To review logs:
     - Open the file TidyArr.log in the same directory as the script.
+
+
+
 """
 
 import os
@@ -56,10 +71,11 @@ from dotenv import load_dotenv
 
 
 # Constants
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_NAME = os.path.splitext(os.path.basename(__file__))[0]
 DB_NAME = f"{SCRIPT_NAME}.json"
-LOG_NAME = f"{SCRIPT_NAME}.log"
-DB_POOL = TinyDB(DB_NAME, sort_keys=True, indent=4, separators=(",", ": "))
+LOG_NAME = os.path.join(SCRIPT_DIR, f"{SCRIPT_NAME}.log")
+DB_POOL = TinyDB(os.path.join(SCRIPT_DIR, DB_NAME), sort_keys=True, indent=4, separators=(",", ": "))
 
 # Create a logger that rotates the log file every day
 logger = logging.getLogger(SCRIPT_NAME)
@@ -67,7 +83,6 @@ logger.setLevel(logging.DEBUG)
 handler = TimedRotatingFileHandler(LOG_NAME, when="midnight", backupCount=7)
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
-
 
 # import .env file
 load_dotenv()
@@ -78,28 +93,38 @@ ENDPOINTS = {}
 # Loop through all environment variables and add any that match the naming convention
 for key, value in os.environ.items():
     if key.startswith("ENDPOINT_") and key.endswith("_URL"):
-        name = key.split("_")[1]
-        api_key = os.environ.get(f"ENDPOINT_{name}_API_KEY")
-        ENDPOINTS[name] = {"url": value, "api_key": api_key}
+        env_endpoint_name = key.split("_")[1]
+        env_api_key = os.environ.get(f"ENDPOINT_{env_endpoint_name}_API_KEY")
+        ENDPOINTS[env_endpoint_name] = {"url": value, "api_key": env_api_key}
 
 # Check if any endpoints were defined
-if not ENDPOINTS:
+if ENDPOINTS:
+    logger.debug("Endpoints loaded successfully.")
+    print("Endpoints loaded successfully.")
+else:
     logger.error("No endpoints defined. Please check your configuration.")
+    print("No endpoints defined. Please check your configuration.")
+    exit(1)
+
+# dotenv Configuration
+QB_HOSTNAME = os.environ.get("QB_HOSTNAME")
+QB_PORT = int(os.environ.get("QB_PORT", 0))
+QB_USERNAME = os.environ.get("QB_USERNAME")
+QB_PASSWORD = os.environ.get("QB_PASSWORD")
+SCRIPT_INTERVAL = int(os.environ.get("SCRIPT_INTERVAL", 600))
+INACTIVE_THRESHOLD = int(os.environ.get("INACTIVE_THRESHOLD", 72))
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+
+# Check if all necessary environment variables are set
+if all([QB_HOSTNAME, QB_PORT, QB_USERNAME, QB_PASSWORD]):
+    logger.debug("Configuration loaded successfully.")
+    print("Configuration loaded successfully.")
+else:
+    logger.error("Not all necessary environment variables are set.")
+    print("Not all necessary environment variables are set.")
     exit(1)
 
 
-# dotenv Configuration
-QB_HOSTNAME: str = os.environ.get("QB_HOSTNAME")
-QB_PORT: int = int(os.environ.get("QB_PORT"))
-QB_USERNAME: str = os.environ.get("QB_USERNAME")
-QB_PASSWORD: str = os.environ.get("QB_PASSWORD")
-SCRIPT_INTERVAL: int = int(os.environ.get("SCRIPT_INTERVAL") or 600)
-INACTIVE_THRESHOLD: int = int(os.environ.get("INACTIVE_THRESHOLD") or 72)
-LOG_LEVEL: str = os.environ.get("LOG_LEVEL") or "INFO"
-
-# Check if all necessary environment variables are set
-if not all([QB_HOSTNAME, QB_PORT, QB_USERNAME, QB_PASSWORD]):
-    raise ValueError("Not all necessary environment variables are set.")
 
 
 async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
@@ -135,9 +160,9 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                     # Remove records that have a status of "delay" or "completed"
                     records = [item for item in records if item["status"] not in {"delay", "completed"}]
 
-                    # When we get the record, we need to deduplicate items that have the same downloadID.  
+                    # When we get the record, we need to deduplicate items that have the same downloadID.
                     # We should look for the id with the lowest value and keep that record.
-                    # We can do this by creating a dictionary with the downloadID as the key and the record as the value.  
+                    # We can do this by creating a dictionary with the downloadID as the key and the record as the value.
                     # Then we can sort the dictionary by the downloadID and keep the first item.
                     records_dict = {item["downloadId"]: item for item in records}
                     records = sorted(records_dict.values(), key=lambda item: item["downloadId"])
@@ -152,6 +177,13 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
                         for item in records
                     ]
 
+                    # Log the number of items gathered
+                    logger.debug(
+                        "Successfully retrieved %d items from endpoint - Endpoint: %s",
+                        len(raw_endpoint_data),
+                        endpoint_name,
+                    )
+
                     return raw_endpoint_data or []
 
                 else:
@@ -165,6 +197,7 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
         except (aiohttp.ClientError, json.JSONDecodeError) as exc:
             logger.exception("Error retrieving data from endpoint - Endpoint: %s : %s", endpoint_name, exc)
             return []
+
 
 
 
@@ -202,6 +235,12 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
                 for t in torrents
             ]
 
+            # Log the number of items gathered
+            logger.debug(
+                "Successfully retrieved %d items from qBittorrent",
+                len(filtered_torrents),
+            )
+
             return filtered_torrents or []
 
     except qbittorrentapi.LoginFailed as exc:
@@ -215,6 +254,8 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
     except Exception as exc:
         logger.exception("Error retrieving data from qBittorrent: %s", exc)
         return []
+
+
 
 
 async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str, str]], qbittorrent_data: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -257,6 +298,7 @@ async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str,
     except Exception as exc:
         logger.exception("Error matching and updating qBittorrent data: %s", exc)
         return []
+
 
 
 
@@ -308,9 +350,15 @@ async def compare_new_and_existing_data(merged_endpoint_data: List[Dict[str, Any
         # Return the lists in a tuple, and if any list is empty - return None
         return new_items or [], active_items or [], missing_items or [], inactive_items or []
 
+    except KeyError as exc:
+        logger.exception("Error accessing dictionary key: %s", exc)
+    except ValueError as exc:
+        logger.exception("Error with value: %s", exc)
     except Exception as exc:
         logger.exception("Error comparing new and existing data: %s", exc)
         return [], [], [], []
+
+
 
 
 async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], existing_items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -355,8 +403,8 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
                         merged_endpoint_item["inactiveCount"] /= 2
                         logger.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                     else:
-                        merged_endpoint_item["inactiveCount"] *= 1.5
-                        logger.warning("Inactive count for item %s doubled (Total: %s) due to no sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        merged_endpoint_item["inactiveCount"] *= 1.1
+                        logger.warning("Inactive count for item %s multiplied by 1.1 (Total: %s) due to no sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                 if merged_endpoint_item["qb_status"] == "stalledDL":
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] /= 2
@@ -386,6 +434,8 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
                     logger.debug("Item %s added to active_items list", merged_endpoint_item['title'])
 
     return inactive_items or [], active_items or []
+
+
 
 
 async def upsert_new_and_updated_data_into_database(db_pool: TinyDB.table, endpoint_name: str, active_items: List[Dict[str, str]], new_items: List[Dict[str, str]]):
@@ -494,6 +544,8 @@ async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_nam
                 # If the response is not successful, log an error
                 else:
                     logger.error("Item %s not removed from %s", item['title'], endpoint_name)
+
+
 
 
 
