@@ -9,6 +9,7 @@ Don't let stalled downloads slow you down. With TidyArr, you can automate the pr
   - [Features](#features)
   - [Description](#description)
     - [Developer Notes](#developer-notes)
+    - [How the script processes data](#how-the-script-processes-data)
     - [How we calculate inactivity](#how-we-calculate-inactivity)
       - [Ways to increase the inactivity counter](#ways-to-increase-the-inactivity-counter)
       - [Ways to decrease the inactivity counter](#ways-to-decrease-the-inactivity-counter)
@@ -32,6 +33,7 @@ Don't let stalled downloads slow you down. With TidyArr, you can automate the pr
 - Monitors torrents added to qBittorrent by Radarr and Sonarr
 - Removes items identified as inactive torrents
 - Tells the \*Arr endpoint that the item has failed.  If the \*Arr endpoint is configured properly, then a different copy will be added to be acquired
+- Uses asynchronous calls for fast performance
 - Uses weighted scoring and a snowball effect to determine which items should be removed
 - Stores the state of the script in a TinyDB JSON file
 - Logs the decisions the script is making for debugging
@@ -44,38 +46,57 @@ Don't let stalled downloads slow you down. With TidyArr, you can automate the pr
 
 TidyArr is a Python script that helps you manage your torrents in qBittorrent. It works with Radarr and Sonarr to remove torrents that are not actively downloading. When TidyArr identifies an inactive torrent, it will tell Radarr or Sonarr that the item has failed. If Radarr or Sonarr is set up to redownload a new torrent when an item fails, it will do so.
 
-Inactive torrents are defined as items that are not actively downloading.  We use conditions to check for these items, and use weighted scoring and a snowball effect to determine which items should be removed.
+Inactive torrents are defined as items that are not actively downloading.  We use conditions to check for these items and use weighted scoring and a snowball effect to determine which items should be removed.
 
 ### Developer Notes
 
-This is passion project to learn Python and solve some challenges I've encountered.  I searched for a long time for a good script that removed stalled downloads, but they either didn't have a means of accumulating inactivity, or didn't have a way to decay the inactivity if a torrent became available.  I presume this will work with any of the \*arr apps, but I've only personally tested it on Radarr and Sonarr.
+This is a passion project to learn Python and solve some challenges I've encountered.  I searched for a long time for a good script that removed stalled downloads, but they either didn't have a means of accumulating inactivity, or didn't have a way to decay the inactivity if a torrent became available.  I presume this will work with any of the \*arr apps, but I've only personally tested it on Radarr and Sonarr.
 
-I'm sure there's better variables to monitor, different weights to apply and perhaps a more robust way of calculating inactivity - but this has been _good'nuff_ for me.  
+I'm sure there are better variables to monitor, different weights to apply and perhaps a more robust way of calculating inactivity - but this has been _good'nuff_ for me.  
 
 I'll probably continue tinkering - since that's who I am - but largely this is as is for now.  I can make a list of wish list items, but I don't expect to achieve all or any of them anytime soon.
 
 - [ ] Add unit testing for testing resiliency
-- [X] Change inactivity formula to account for current progress and minimize the hit to the inactivity if the download is near completion.
+- [X] Change the inactivity formula to account for current progress and minimize the hit to the inactivity if the download is near completion.
 - [ ] Add additional torrent client support
 - [ ] Build this script into a Docker container
 - [ ] Revisit all logging output to ensure standardization
 - [ ] Create a way to capture torrent metrics for use in ML training
 - [ ] Experiment with ML to determine a better growth and decay formula
-- [ ] Build a ML model that can predict if a download is likely to finish
+- [ ] Build an ML model that can predict if a download is likely to finish
 - [ ] Auto-Updater
+
+### How the script processes data
+
+The script runs continuously and performs the following steps:
+
+1. Get data from qBittorrent
+2. Get data from each endpoint
+3. Merge the data from each endpoint with the data from qBittorrent
+4. Compare the new data with the existing data in the database and separate it into 3 categories:
+   1. `Missing Items:` Items not in the endpoint, but in the database
+   2. `New Items:` Items in the endpoint, but not in the database
+   3. `Existing Items:` Items in the database and endpoint.  Evaluate for inactivity and break it into two categories:
+      1. `Active Items:` Items may have had inactivity scores added
+      2. `Inactive Items:` Items that have breached the inactivity threshold
+5. Update the database with the `New Items` and `Active Items` data
+6. Notify the endpoint to remove `Inactive` items
+7. Remove any `Missing` or `Inactive` Items from the database
+8. Wait for a specified interval before starting the process again
 
 ### How we calculate inactivity
 
 #### Ways to increase the inactivity counter
 
-1. If the qbittorrent status is stalledDL and the sizeleft has not changed
-2. If the qbittorrent status is stalledDL and has peers with a value of 0
-3. If the qbittorrent status is stalledDL and has seeds with a value of 0
-4. If the qbittorrent status is stalledDL and the availability is less than 0.1
-5. If the qbittorrent status is "metaDL"
-6. If the qbittorrent filesize is the same as the previous filesize, start to snowball the inactivity counter by multiplying it by 1.05
+1. If the qbittorrent status is "metaDL"
+2. If the inactiveCount is above 1 and filesize has not changed, start to snowball the inactivity counter
+3. If the qbittorrent status is stalledDL and
+   1. the sizeleft has not changed
+   2. has peers with a value of 0
+   3. has seeds with a value of 0
+   4. availability is less than 0.1
 
-We then take the difference between the original inactive count and the updated inactive count - and reduce the updated count by the % that the file is completed.
+We then take the difference between the original inactive count and the updated inactive count - and reduce the difference by the % that the file is completed.  This should encourage us to keep files that are near completion.
 
 #### Ways to decrease the inactivity counter
 
