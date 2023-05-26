@@ -90,13 +90,13 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "WARNING")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_NAME = os.path.splitext(os.path.basename(__file__))[0]
 DB_NAME = f"{SCRIPT_NAME}.json"
-LOG_NAME = os.path.join(SCRIPT_DIR, f"{SCRIPT_NAME}.log")
+LOG_NAME = os.path.join(SCRIPT_DIR, f"{SCRIPT_NAME}")
 DB_POOL = TinyDB(os.path.join(SCRIPT_DIR, DB_NAME), sort_keys=True, indent=4, separators=(",", ": "))
 
 # Create a logger that rotates the log file every day
 logger = logging.getLogger(SCRIPT_NAME)
 logger.setLevel(getattr(logging, LOG_LEVEL))
-handler = TimedRotatingFileHandler(LOG_NAME, when="midnight", backupCount=7)
+handler = TimedRotatingFileHandler(LOG_NAME + ".log", when="midnight", backupCount=7)
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 
@@ -399,10 +399,12 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
 
                 if existing_item["inactiveCount"] > 1:
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
-                        merged_endpoint_item["inactiveCount"] /= round(merged_endpoint_item["inactiveCount"] / 2, 2)
+                        merged_endpoint_item["inactiveCount"] /= 2
+                        merged_endpoint_item["inactiveCount"] = round(merged_endpoint_item["inactiveCount"], 2)
                         logger.warning("Inactive count for item %s decreased to %s due to sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
                     else:
-                        merged_endpoint_item["inactiveCount"] *= round(merged_endpoint_item["inactiveCount"] / 1.05, 2)
+                        merged_endpoint_item["inactiveCount"] *= 1.05
+                        merged_endpoint_item["inactiveCount"] = round(merged_endpoint_item["inactiveCount"], 2)
                         logger.warning("Inactive count for item %s multiplied by 1.05 (Total: %s) due to no sizeleft change", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 if merged_endpoint_item["qb_status"] == "stalledDL":
@@ -427,7 +429,7 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
                     logger.warning("Inactive count for item %s increased by 10 (Total: %s) due to metaDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 if merged_endpoint_item["percentage_completed"] > 0.1 and merged_endpoint_item["inactiveCount"] > existing_item["inactiveCount"]:
-                    prorated_inactive_count = abs(merged_endpoint_item["inactiveCount"] - (existing_item["inactiveCount"])) * merged_endpoint_item["percentage_completed"]
+                    prorated_inactive_count = round(abs(merged_endpoint_item["inactiveCount"] - (existing_item["inactiveCount"])) * merged_endpoint_item["percentage_completed"], 2)
                     merged_endpoint_item["inactiveCount"] = round(merged_endpoint_item["inactiveCount"] - prorated_inactive_count, 2)
                     logger.warning("Inactive count for item %s decreased by %s (Total: %s) due to percentage completed: %s", merged_endpoint_item['title'], prorated_inactive_count, merged_endpoint_item['inactiveCount'], merged_endpoint_item['percentage_completed'])
 

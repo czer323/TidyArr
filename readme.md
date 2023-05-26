@@ -4,7 +4,6 @@ Don't let stalled downloads slow you down. With TidyArr, you can automate the pr
 
 ## Table of Contents
 
-
 - [Features](#features)
 - [Description](#description)
   - [Developer Notes](#developer-notes)
@@ -23,15 +22,17 @@ Don't let stalled downloads slow you down. With TidyArr, you can automate the pr
   - [Submitting Feature Requests](#submitting-feature-requests)
   - [Submitting Code Changes](#submitting-code-changes)
 - [Credits](#credits)
+  - [Tools used during Development](#tools-used-during-development)
 - [License](#license)
 
 ## Features
 
-- Monitors torrents added to qBittorrent by Radarr and Sonarr
+- Monitors torrents added to qBittorrent by *Arr
 - Removes items identified as inactive torrents
-- Tells the \*Arr endpoint that the item has failed.  If the \*Arr endpoint is configured properly, then a different copy will be added to be acquired
+- Notifies the \*Arr endpoint that the item has failed
+- If the \*Arr endpoint is configured properly, then a different copy will be added to be acquired
 - Uses asynchronous calls for fast performance
-- Uses weighted scoring and a snowball effect to determine which items should be removed
+- Uses weighted scoring and exponential growth/decay to determine which items should be removed
 - Stores the state of the script in a TinyDB JSON file
 - Logs the decisions the script is making for debugging
 - Uses environment variables to set the:
@@ -43,7 +44,7 @@ Don't let stalled downloads slow you down. With TidyArr, you can automate the pr
 
 TidyArr is a Python script that helps you manage your torrents in qBittorrent. It works with Radarr and Sonarr to remove torrents that are not actively downloading. When TidyArr identifies an inactive torrent, it will tell Radarr or Sonarr that the item has failed. If Radarr or Sonarr is set up to redownload a new torrent when an item fails, it will do so.
 
-Inactive torrents are defined as items that are not actively downloading.  We use conditions to check for these items and use weighted scoring and a snowball effect to determine which items should be removed.
+Inactive torrents are defined as items that are not actively downloading.  We use conditions to check for these items and use weighted scoring and exponential growth/decay to determine which items should be removed.
 
 ### Developer Notes
 
@@ -57,7 +58,7 @@ I'll probably continue tinkering - since that's who I am - but largely this is a
 - [X] Change the inactivity formula to account for current progress and minimize the hit to the inactivity if the download is near completion.
 - [ ] Add additional torrent client support
 - [ ] Build this script into a Docker container
-- [ ] Revisit all logging output to ensure standardization
+- [X] Revisit all logging output to ensure standardization
 - [ ] Create a way to capture torrent metrics for use in ML training
 - [ ] Experiment with ML to determine a better growth and decay formula
 - [ ] Build an ML model that can predict if a download is likely to finish
@@ -79,7 +80,7 @@ The script runs continuously and performs the following steps:
 5. Update the database with the `New Items` and `Active Items` data
 6. Notify the endpoint to remove `Inactive` items
 7. Remove any `Missing` or `Inactive` Items from the database
-8. Wait for a specified interval before starting the process again
+8. Wait for a specified interval before starting the process again (Default: 10 minutes)
 
 ### How we calculate inactivity
 
@@ -87,7 +88,7 @@ The script runs continuously and performs the following steps:
 
 1. If the qbittorrent status is "metaDL"
 2. If the inactiveCount is above 1 and filesize has not changed, start to snowball the inactivity counter
-3. If the qbittorrent status is stalledDL and
+3. If the qbittorrent status is "stalledDL" and
    1. the sizeleft has not changed
    2. has peers with a value of 0
    3. has seeds with a value of 0
@@ -272,6 +273,14 @@ This project was inspired by and built upon the work of the developers of Radarr
 We would also like to thank the many contributors to these projects, who have helped to improve and maintain them over the years. Without their hard work and dedication, this project would not be possible.
 
 Thank you to all the developers and contributors who have made the *arr ecosystem what it is today!
+
+### Tools used during Development
+
+- Python
+- VSCode
+- Github Copilot
+- TinyDB
+- qBittorrent-API
 
 ## License
 
