@@ -2,6 +2,21 @@
 
 Don't let stalled downloads slow you down. With TidyArr, you can automate the process of removing inactive items from your *Arr endpoints to keep your downloads tidy.
 
+## Features
+
+- Monitors torrents added to qBittorrent by *Arr
+- Removes items identified as inactive torrents
+- Notifies the \*Arr endpoint that the item has failed
+- If the \*Arr endpoint is configured properly, then a different copy will be added to be acquired
+- Uses asynchronous calls for fast performance
+- Uses weighted scoring and exponential growth/decay to determine which items should be removed
+- Stores the state of the script in a TinyDB JSON file
+- Logs the decisions the script is making for debugging
+- Uses environment variables to set the:
+  - hostname or IP address, port, username, and password of the qBittorrent API
+  - URL and API key for any number of *Arr endpoints
+  - optional customization of the script interval, inactive threshold, and log level
+
 ## Table of Contents
 
 - [Features](#features)
@@ -24,21 +39,6 @@ Don't let stalled downloads slow you down. With TidyArr, you can automate the pr
 - [Credits](#credits)
   - [Tools used during Development](#tools-used-during-development)
 - [License](#license)
-
-## Features
-
-- Monitors torrents added to qBittorrent by *Arr
-- Removes items identified as inactive torrents
-- Notifies the \*Arr endpoint that the item has failed
-- If the \*Arr endpoint is configured properly, then a different copy will be added to be acquired
-- Uses asynchronous calls for fast performance
-- Uses weighted scoring and exponential growth/decay to determine which items should be removed
-- Stores the state of the script in a TinyDB JSON file
-- Logs the decisions the script is making for debugging
-- Uses environment variables to set the:
-  - hostname or IP address, port, username, and password of the qBittorrent API
-  - URL and API key for any number of *Arr endpoints
-  - optional customization of the script interval, inactive threshold, and log level
 
 ## Description
 
@@ -218,12 +218,14 @@ erDiagram
     }
     QBITTORRENT {
         varchar(255) name
+        int availability
         varchar(255) state
         int num_seeds
         int num_leeches
         int progress
     }
     TINYDB {
+        int availability
         string downloadId
         int id
         int inactiveCount
