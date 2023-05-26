@@ -201,7 +201,7 @@ graph TD
     E --> |Active Item| H;
     F --> H;
     G --> H(Update database pool);
-    H --> I(Log database status and wait until next cycle);
+    H --> I(Wait until next cycle);
 ```
 
 ### Item schema stored in TinyDB
@@ -250,7 +250,15 @@ Thank you for considering contributing to this project! Please follow the guidel
 
 ### Reporting Bugs
 
-If you find a bug, please open an issue on the project's GitHub repository. Please include a clear and detailed description of the bug, steps to reproduce it, and any relevant screenshots or error messages.
+If you find a bug, please open an issue on the project's GitHub repository. Please include a clear and detailed description of the bug, debug logs and any relevant screenshots or error messages.
+
+Here are the steps to capture logs:
+
+1. Set the LOG_LEVEL variable in the script settings to DEBUG.
+2. Reproduce the issue you are experiencing.
+3. Locate the log file in the project directory. The default log file name is tidyarr.log.
+4. Include the relevant log entries in your bug report or support request.
+5. Please note that setting the LOG_LEVEL variable to DEBUG will generate a lot of log output, so be sure to set it back to WARNING or ERROR when you are finished debugging.
 
 ### Submitting Feature Requests
 
