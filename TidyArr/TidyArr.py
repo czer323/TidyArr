@@ -64,7 +64,7 @@ import logging
 import os
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Union
 import aiohttp
 import qbittorrentapi
 from dotenv import load_dotenv
@@ -76,7 +76,7 @@ from tinydb import Query, TinyDB
 load_dotenv()
 
 # dotenv Configuration
-QB_HOSTNAME = os.environ.get("QB_HOSTNAME")
+QB_HOSTNAME = str(os.environ.get("QB_HOSTNAME"))
 QB_PORT = int(os.environ.get("QB_PORT", 0))
 QB_USERNAME = os.environ.get("QB_USERNAME")
 QB_PASSWORD = os.environ.get("QB_PASSWORD")
@@ -133,7 +133,7 @@ else:
 
 
 
-async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
+async def get_data_from_endpoint(endpoint_name: str) -> Union[List[Dict[str, Any]], None]:
     """
     Retrieve data from an external API endpoint.
 
@@ -141,7 +141,7 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
         endpoint_name (str): The name of the API endpoint.
 
     Returns:
-        List[Dict[str, str]]: The retrieved data.
+        List[Dict[str, Any]]: The retrieved data.
     """
 
     # Retrieve the endpoint URL and API key from the ENDPOINTS dict
@@ -199,7 +199,7 @@ async def get_data_from_endpoint(endpoint_name: str) -> List[Dict[str, str]]:
 
 
 
-async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
+async def get_data_from_qbittorrent() -> Union[List[Dict[str, Any]], None]:
     """
     This function retrieves data from qBittorrent and returns it as a list of dicts containing only the keys we need.
     The keys we need are: name, state, num_seeds, num_leechs, progress.
@@ -254,7 +254,7 @@ async def get_data_from_qbittorrent() -> List[Dict[str, str]]:
 
 
 
-async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str, str]], qbittorrent_data: List[Dict[str, str]]) -> List[Dict[str, str]]:
+async def merge_endpoint_with_qbittorrent_data(raw_endpoint_data: List[Dict[str, Any]], qbittorrent_data: List[Dict[str, Any]]) -> Union[List[Dict[str, Any]], None]:
     """
     This function iterates over the raw_endpoint_data and attempts to match each item with an item in the qbittorrent_data.
     It then updates the endpoint data with the matched qbittorrent data and returns the updated endpoint data.
@@ -448,13 +448,13 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
 
 
 
-async def upsert_new_and_updated_data_into_database(db_pool: TinyDB.table, endpoint_name: str, active_items: List[Dict[str, str]], new_items: List[Dict[str, str]]):
+async def upsert_new_and_updated_data_into_database(db_pool: TinyDB, endpoint_name: str, active_items: List[Dict[str, Any]], new_items: List[Dict[str, Any]]):
     """
     This function upserts the new and updated data into the TinyDB database table named after the endpoint.
     New items are added to the database.  Updated items are updated in the database.
 
     Args:
-        db_pool (TinyDB.table): The TinyDB table object.
+        db_pool (TinyDB): The TinyDB table object.
         endpoint_name (str): The name of the endpoint.
         active_items (List[Dict[str, str]]): The list of active items to be updated in the database.
         new_items (List[Dict[str, str]]): The list of new items to be added to the database.
@@ -484,12 +484,12 @@ async def upsert_new_and_updated_data_into_database(db_pool: TinyDB.table, endpo
 
 
 
-async def remove_missing_data_from_database(db_pool: TinyDB.table, endpoint_name: str, missing_items: List[Dict[str, str]]):
+async def remove_missing_data_from_database(db_pool: TinyDB, endpoint_name: str, missing_items: List[Dict[str, Any]]):
     """
     This function removes missing data from the database.
 
     Args:
-        db_pool (TinyDB.table): The TinyDB table object.
+        db_pool (TinyDB): The TinyDB table object.
         endpoint_name (str): The name of the endpoint.
         missing_items (List[Dict[str, str]]): The list of missing items to be removed from the database.
 
@@ -511,18 +511,17 @@ async def remove_missing_data_from_database(db_pool: TinyDB.table, endpoint_name
 
 
 
-async def remove_inactive_data_from_endpoint(db_pool: TinyDB.table, endpoint_name: str, inactive_items: Dict[str, str]):
+async def remove_inactive_data_from_endpoint(db_pool: TinyDB, endpoint_name: str, inactive_items: List[Dict[str, Any]]):
     """
-    This function connects to the sonarr or radarr endpoint based on the endpoint_name performs a delete operation on the inactive items.
-    We should expect a 200 response code if the delete operation was successful.
-    We will need to pass some paramaters to the endpoint to connect to the correct endpoint and add the item to the blocklist.
-    
+    This function removes inactive data from the endpoint.
+
     Args:
-        endpoint_name (str): The connection string for the database.
-        inactive_items (Dict[str, str]): List of items that have been identified as inactive.
+        db_pool (TinyDB): The TinyDB instance.
+        endpoint_name (str): The name of the endpoint.
+        inactive_items (List[Dict[str, Any]]): The list of inactive items to be removed from the endpoint.
 
     Returns:
-    
+        None
     """
     # Define a query object for searching the database
     query = Query()
@@ -577,7 +576,6 @@ async def main() -> None:
 
             # Get data from the endpoint
             raw_endpoint_data = await get_data_from_endpoint(endpoint_name)
-
             # Skip processing if qbittorrent_data is not received
             if raw_endpoint_data is None:
                 logger.critical("No data received from endpoint. Skipping endpoint %s", endpoint_name)
@@ -585,11 +583,17 @@ async def main() -> None:
 
             # Merge endpoint data with qBittorrent data
             merged_endpoint_data = await merge_endpoint_with_qbittorrent_data(raw_endpoint_data, qbittorrent_data)
+            # Skip processing if merged_endpoint_data is not received
+            if merged_endpoint_data is None:
+                logger.critical("No data received during merge. Skipping endpoint %s", endpoint_name)
+                continue
 
             # Get existing data from the database
             existing_data = DB_POOL.table(endpoint_name).all()
 
             # Compare new and existing data
+            existing_data = DB_POOL.table(endpoint_name).all()
+            existing_data = [dict(item) for item in existing_data]
             new_items, active_items, missing_items, inactive_items = await compare_new_and_existing_data(merged_endpoint_data, existing_data)
 
             # Create tasks for each database operation
