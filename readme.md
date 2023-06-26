@@ -119,7 +119,7 @@ If an item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD,
 3. Set the required environment variables as described in the README file. You can set these environment variables using the command line or by adding them to a `.env` file in the root directory of the script.
 
     💡 **`TIP`**
-    You can get an example copy from this repo: <https://www.github.com/czer323/TidyArr/TidyArr/.env.example>
+    You can get an example copy from this repo: <https://raw.githubusercontent.com/czer323/TidyArr/master/TidyArr/.env.example>
 
 4. Run the TidyArr script by running the following command in the root directory of the script:
 
