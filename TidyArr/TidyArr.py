@@ -9,11 +9,14 @@ and use weighted scoring and a snowball effect to determine which items should b
 The script will check for the following conditions to determine if an item is inactive:
 
     Ways to increase the inactivity counter:
-        1. If the qbittorrent status is stalledDL and the sizeleft has not changed
-        2. If the qbittorrent has peers with a value of 0
-        3. If the qbittorrent has seeds with a value of 0
-        4. If the qbittorrent status is "metaDL"
-        5. If the qbittorrent filesize is the same as the previous filesize, start to snowball the inactivity counter by multiplying it by 1.1
+        1. If the qbittorrent status is stalledDL 
+            1. If the sizeleft has not changed
+            2. If the qbittorrent has peers with a value of 0
+            3. If the qbittorrent has seeds with a value of 0
+            4. If the qbittorrent has availablitiy less than .1
+        2. If the qbittorrent status is "metaDL"
+        3. If the qbittorrent filesize is the same as the previous filesize, start to snowball the inactivity counter by multiplying it by 1.1
+        4. If the status from the endpoint has an error message that contains "Invalid video file" or "unsupported extension: '.lnk'"
 
     Ways to decrease the inactivity counter:
         1. If the existing item has an inactiveCount above 0, and the sizeleft has changed, then we halve the inactiveCounter.
@@ -96,9 +99,17 @@ DB_POOL = TinyDB(os.path.join(SCRIPT_DIR, DB_NAME), sort_keys=True, indent=4, se
 # Create a logger that rotates the log file every day
 logger = logging.getLogger(SCRIPT_NAME)
 logger.setLevel(getattr(logging, LOG_LEVEL))
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+# Create a file handler to rotate the log file every day
 handler = TimedRotatingFileHandler(LOG_NAME + ".log", when="midnight", backupCount=7)
-handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+handler.setFormatter(formatter)
 logger.addHandler(handler)
+
+# Create a stream handler to output logs to the console
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
 
 # Create a dictionary to store all the endpoints
 ENDPOINTS = {}
@@ -119,8 +130,6 @@ else:
     print("No endpoints defined. Please check your configuration.")
     sys.exit(1)
 
-
-
 # Check if all necessary environment variables are set
 if all([QB_HOSTNAME, QB_PORT, QB_USERNAME, QB_PASSWORD]):
     logger.info("Configuration loaded successfully.")
@@ -133,9 +142,10 @@ else:
 
 
 
+
 async def get_data_from_endpoint(endpoint_name: str) -> Union[List[Dict[str, Any]], None]:
     """
-    Retrieve data from an external API endpoint.
+    Retrieve data from an external API endpoint. ie, Sonarr, Radarr, Lidarr or Readarr
 
     Args:
         endpoint_name (str): The name of the API endpoint.
@@ -163,8 +173,15 @@ async def get_data_from_endpoint(endpoint_name: str) -> Union[List[Dict[str, Any
                     # Extract the records from the response data
                     records = response_data["records"]
 
-                    # Remove records that have a status of "delay" or "completed"
-                    records = [item for item in records if item["status"] not in {"delay", "completed"}]
+                    # Modified filter: Include items that are either:
+                    # 1. Not completed/delayed
+                    # 2. Have warning status or import pending state
+                    records = [
+                        item for item in records 
+                        if (item["status"] not in {"delay"}) or
+                           (item.get("trackedDownloadStatus") == "warning") or
+                           (item.get("trackedDownloadState") == "importPending")
+                    ]
 
                     # When we get the record, we need to deduplicate items that have the same downloadID.
                     # We should look for the id with the lowest value and keep that record.
@@ -176,9 +193,15 @@ async def get_data_from_endpoint(endpoint_name: str) -> Union[List[Dict[str, Any
                     # Extract only the keys we need from each item in the records list
                     raw_endpoint_data = [
                         {
-                            key: value
+                            key: value.strip().encode('ascii', 'ignore').decode()
+                            if key == "title"
+                            else value
                             for key, value in item.items()
-                            if key in {"id", "title", "status", "sizeleft", "downloadId"}
+                            if key in {
+                                "id", "title", "status", "sizeleft", "downloadId",
+                                "trackedDownloadStatus", "trackedDownloadState",
+                                "statusMessages"
+                            }
                         }
                         for item in records
                     ]
@@ -224,11 +247,11 @@ async def get_data_from_qbittorrent() -> Union[List[Dict[str, Any]], None]:
             # Filter the torrents to only include the keys we need
             filtered_torrents = [
                 {
-                    "name": t["name"],
+                    "name": t["name"].encode("ascii", "ignore").decode(),
                     "qb_status": t["state"],
                     "seeds": t["num_seeds"],
                     "peers": t["num_leechs"],
-                    "percentage_completed": round(t["progress"], 2),
+                    "percentage_completed": t["progress"],
                     "availability": t["availability"],
                 }
                 for t in torrents
@@ -363,8 +386,7 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
     """
     This function checks for conditions between the merged_endpoint_data items and existing_items to determine how much the inactiveCounter should be incremented.
     Multiple conditions can be matched to determine inactivity and use weighted scoring to increment the inactiveCounter.
-    If the existing_item has an inactiveCount above 0, and the sizeleft has changed, half the inactiveCounter.
-    If the merged_endpoint_data item has a stalledDL qb_status and the sizeleft has changed, half the inactiveCounter.
+    If the existing_item has an inactiveCount above 2, and the sizeleft has changed, half the inactiveCounter.
     If the merged_endpoint_data item has a stalledDL qb_status and the sizeleft has not changed, increment the inactiveCounter.
     If the merged_endpoint_data item has a key value named qbittorrent and has peers or seeds with a value of 0, increment the inactiveCounter.
     If the merged_endpoint_data qbittorrent qb_status is "metaDL", increment the inactiveCounter.
@@ -397,7 +419,31 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
         for merged_endpoint_item in merged_endpoint_data:
             if existing_item["id"] == merged_endpoint_item["id"]:
 
-                if existing_item["inactiveCount"] > 1:
+                # Check for specific error conditions from Sonarr/Radarr
+                if "errorMessage" in merged_endpoint_item:
+                    error_msg = merged_endpoint_item["errorMessage"]
+                    if "Invalid video file" in error_msg or "unsupported extension: '.lnk'" in error_msg:
+                        merged_endpoint_item["inactiveCount"] = INACTIVE_THRESHOLD
+                        inactive_items.append(merged_endpoint_item)
+                        logger.error("Invalid file detected for %s: %s", 
+                                   merged_endpoint_item['title'],
+                                   error_msg)
+                        continue
+
+                # Also check status messages for additional context
+                if "statusMessages" in merged_endpoint_item:
+                    for status in merged_endpoint_item["statusMessages"]:
+                        if isinstance(status, dict) and "messages" in status:
+                            for message in status["messages"]:
+                                if "Invalid video file" in message or "unsupported extension: '.lnk'" in message:
+                                    merged_endpoint_item["inactiveCount"] = INACTIVE_THRESHOLD
+                                    inactive_items.append(merged_endpoint_item)
+                                    logger.error("Invalid file detected in status for %s: %s",
+                                               merged_endpoint_item['title'],
+                                               message)
+                                    continue
+
+                if existing_item["inactiveCount"] > 2:
                     if existing_item["sizeleft"] != merged_endpoint_item["sizeleft"]:
                         merged_endpoint_item["inactiveCount"] /= 2
                         merged_endpoint_item["inactiveCount"] = round(merged_endpoint_item["inactiveCount"], 2)
@@ -418,7 +464,10 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
 
                     if merged_endpoint_item["seeds"] == 0:
                         merged_endpoint_item["inactiveCount"] += 2
-                        logger.warning("Inactive count for item %s increased by 2 (Total: %s) due to 0 seeds", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
+                        logger.warning("Inactive count for item %s increased by 2 (Total: %s) due to 0 seeds",
+                                       merged_endpoint_item['title'],
+                                       merged_endpoint_item['inactiveCount']
+                                       )
 
                     if merged_endpoint_item["availability"] < 0.1:
                         merged_endpoint_item["inactiveCount"] += 1
@@ -429,15 +478,20 @@ async def check_for_inactivity(merged_endpoint_data: List[Dict[str, Any]], exist
                     logger.warning("Inactive count for item %s increased by 10 (Total: %s) due to metaDL qb_status", merged_endpoint_item['title'], merged_endpoint_item['inactiveCount'])
 
                 if merged_endpoint_item["percentage_completed"] > 0.1 and merged_endpoint_item["inactiveCount"] > existing_item["inactiveCount"]:
-                    prorated_inactive_count = round(abs(merged_endpoint_item["inactiveCount"] - (existing_item["inactiveCount"])) * merged_endpoint_item["percentage_completed"], 2)
+                    prorated_inactive_count = round(abs(merged_endpoint_item["inactiveCount"] - (existing_item["inactiveCount"])) * (merged_endpoint_item["percentage_completed"] * 0.95), 2)
                     merged_endpoint_item["inactiveCount"] = round(merged_endpoint_item["inactiveCount"] - prorated_inactive_count, 2)
-                    logger.warning("Inactive count for item %s decreased by %s (Total: %s) due to percentage completed: %s", merged_endpoint_item['title'], prorated_inactive_count, merged_endpoint_item['inactiveCount'], merged_endpoint_item['percentage_completed'])
+                    logger.warning("Inactive count for item %s decreased by %s (Total: %s) due to percentage completed: %s",
+                                   merged_endpoint_item['title'],
+                                   prorated_inactive_count,
+                                   merged_endpoint_item['inactiveCount'],
+                                   merged_endpoint_item['percentage_completed']
+                                   )
 
                 # If the item's inactiveCounter is greater than or equal to the INACTIVE_THRESHOLD, add it to the inactive_items list.
                 if merged_endpoint_item["inactiveCount"] >= INACTIVE_THRESHOLD:
                     inactive_items.append(merged_endpoint_item)
                     logger.info("Item %s added to inactive_items list", merged_endpoint_item['title'])
-                    
+
                 # If the item's inactiveCounter is less than the INACTIVE_THRESHOLD, add it to the active_items list.
                 else:
                     active_items.append(merged_endpoint_item)
