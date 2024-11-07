@@ -9,3 +9,14 @@ source/.env
 TidyArr.log.*
 TidyArr/.env
 testing.ipynb
+TidyArr/__pycache__/__init__.cpython-311.pyc
+TidyArr/__pycache__/codium_TidyArr.cpython-311-pytest-7.3.1.pyc
+TidyArr/__pycache__/codium_TidyArr.cpython-311.pyc
+TidyArr/__pycache__/TidyArr.cpython-311.pyc
+tests/__pycache__/__init__.cpython-311.pyc
+tests/__pycache__/conftest.cpython-311-pytest-7.3.1.pyc
+tests/__pycache__/test_remove_missing_data_from_database.cpython-311-pytest-7.3.1.pyc
+tests/__pycache__/test_remove_missing_data_from_database.cpython-311.pyc
+tests/__init__.py
+tests/conftest.py
+tests/test_remove_missing_data_from_database.py
